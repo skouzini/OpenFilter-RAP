@@ -1,10 +1,17 @@
-"""Annotator: reads `detections` from frame.data and draws boxes/labels on frame.image.
-Minimal for this milestone — no FPS overlay, no metrics.json (later milestone).
+"""Annotator: reads `detections` from frame.data and draws boxes/labels on frame.image,
+skipping any detection PrivacyBlur has pixelated. Also writes metrics.json each frame
+(detection counts by class) for the Streamlit metrics chart to read.
+Minimal for this milestone — no FPS overlay.
 """
+
+import json
+from collections import Counter
 
 import cv2
 
 from openfilter.filter_runtime.filter import Filter
+
+from filters.control import ControlMixin
 
 BOX_COLOR = (0, 255, 0)  # BGR
 BOX_THICKNESS = 2
@@ -12,13 +19,20 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 0.5
 FONT_THICKNESS = 1
 LABEL_TEXT_COLOR = (0, 0, 0)
+METRICS_PATH = "metrics.json"
 
 
-class Annotator(Filter):
+class Annotator(ControlMixin, Filter):
     def process(self, frames):
         frame = frames["main"].rw
+        control = self.get_control()
 
-        draw_detections(frame.image, frame.data.get("detections", []))
+        detections = frame.data.get("detections", [])
+        blur_enabled = bool(control.get("blur_enabled", False))
+        blur_class = control.get("blur_class")
+
+        draw_detections(frame.image, visible_detections(detections, blur_enabled, blur_class))
+        write_metrics(class_counts(detections))
 
         return {"main": frame}
 
@@ -37,6 +51,26 @@ def draw_detections(image, detections):
         cv2.putText(image, label, (x1, y1 - 2), FONT, FONT_SCALE, LABEL_TEXT_COLOR, FONT_THICKNESS, cv2.LINE_AA)
 
     return image
+
+
+def visible_detections(detections, blur_enabled, blur_class):
+    """Keep only detections that PrivacyBlur has not pixelated. No filtering if blur is disabled."""
+
+    if not blur_enabled:
+        return detections
+
+    return [d for d in detections if d["class"] != blur_class]
+
+
+def class_counts(detections):
+    """Tally detections by class, e.g. {"person": 3, "car": 1}."""
+
+    return dict(Counter(d["class"] for d in detections))
+
+
+def write_metrics(counts, path=METRICS_PATH):
+    with open(path, "w") as f:
+        json.dump({"class_counts": counts}, f)
 
 
 if __name__ == "__main__":

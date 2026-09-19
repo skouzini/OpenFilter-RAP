@@ -3,9 +3,10 @@ import os
 
 import numpy as np
 
-from filters.annotator import draw_detections
+from filters.annotator import class_counts, draw_detections, visible_detections
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
+from filters.privacy_blur import pixelate_region
 
 
 class FakeTensor(list):
@@ -89,6 +90,70 @@ def test_filter_detections_returns_all_when_active_classes_none():
     detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
 
     assert filter_detections(detections, None) == detections
+
+
+def test_pixelate_region_makes_each_block_uniform():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+
+    pixelate_region(image, [10, 10, 30, 30], block_size=10)
+
+    region = image[10:30, 10:30, 0]
+    for by in range(0, 20, 10):
+        for bx in range(0, 20, 10):
+            block = region[by:by + 10, bx:bx + 10]
+            assert (block == block[0, 0]).all()
+
+
+def test_pixelate_region_leaves_pixels_outside_box_unchanged():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[35, 35] = (7, 8, 9)
+
+    pixelate_region(image, [10, 10, 30, 30], block_size=10)
+
+    assert tuple(image[35, 35]) == (7, 8, 9)
+
+
+def test_pixelate_region_returns_the_image():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    result = pixelate_region(image, [10, 10, 30, 30], block_size=10)
+
+    assert result is image
+
+
+def test_visible_detections_excludes_blurred_class_when_enabled():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}, {"class": "car", "box": [0, 0, 1, 1], "score": 0.8}]
+
+    result = visible_detections(detections, blur_enabled=True, blur_class="person")
+
+    assert result == [{"class": "car", "box": [0, 0, 1, 1], "score": 0.8}]
+
+
+def test_visible_detections_returns_all_when_blur_disabled():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
+
+    result = visible_detections(detections, blur_enabled=False, blur_class="person")
+
+    assert result == detections
+
+
+def test_visible_detections_returns_all_when_blur_class_has_no_match():
+    detections = [{"class": "car", "box": [0, 0, 1, 1], "score": 0.9}]
+
+    result = visible_detections(detections, blur_enabled=True, blur_class="person")
+
+    assert result == detections
+
+
+def test_class_counts_tallies_detections_by_class():
+    detections = [{"class": "person"}, {"class": "person"}, {"class": "car"}]
+
+    assert class_counts(detections) == {"person": 2, "car": 1}
+
+
+def test_class_counts_returns_empty_dict_for_no_detections():
+    assert class_counts([]) == {}
 
 
 def test_get_control_parses_valid_json(tmp_path):

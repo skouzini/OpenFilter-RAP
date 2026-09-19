@@ -1,4 +1,4 @@
-"""Stage 2: Detector wired in. VideoIn -> Detector -> Annotator -> Webvis.
+"""Stage: PrivacyBlur wired in. VideoIn -> Detector -> PrivacyBlur -> Annotator -> Webvis.
 
 Source defaults to the looped sample video so this runs without a webcam;
 pass --webcam to use a live camera instead once camera access is confirmed.
@@ -15,6 +15,7 @@ from openfilter.filter_runtime.filters.webvis import Webvis
 
 from filters.annotator import Annotator
 from filters.detector import Detector
+from filters.privacy_blur import PrivacyBlur
 
 SAMPLE_VIDEO = "assets/sample_video.mp4"
 
@@ -38,14 +39,19 @@ def main():
             sources="tcp://127.0.0.1:5550",
             outputs="tcp://*:5552",
         )),
-        (Annotator, dict(
-            id="annotator",
+        (PrivacyBlur, dict(
+            id="privacy_blur",
             sources="tcp://127.0.0.1:5552",
             outputs="tcp://*:5554",
         )),
+        (Annotator, dict(
+            id="annotator",
+            sources="tcp://127.0.0.1:5554",
+            outputs="tcp://*:5556",
+        )),
         (Webvis, dict(
             id="webvis",
-            sources="tcp://127.0.0.1:5554",
+            sources="tcp://127.0.0.1:5556",
             outputs="http://0.0.0.0:8000",
         )),
     ])

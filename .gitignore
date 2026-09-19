@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 *.pt
 control.json
+metrics.json
 .DS_Store
 logs/
 *.egg-info/
