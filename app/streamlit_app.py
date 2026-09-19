@@ -231,7 +231,6 @@ def render_metrics():
         return
 
     st.subheader("Detection confidence (last 30s)")
-    st_autorefresh(interval=2000, key="metrics_refresh")
 
     metrics = read_metrics()
     counts = metrics.get("class_counts") or {}
@@ -261,8 +260,9 @@ def render_stream(running):
     # Only mount the iframe once Webvis is actually reachable: if it's inserted while the
     # server refuses connections, the browser caches that connection-refused navigation on the
     # iframe and never retries it, even after Webvis comes up later in the same session. The
-    # st_autorefresh in render_metrics() keeps rerunning the script every 2s, so this recheck
-    # resolves on its own without any extra plumbing.
+    # st_autorefresh in main() keeps rerunning the script every 2s — unconditionally, not tied to
+    # whether the metrics section happens to be visible — so this recheck resolves on its own
+    # without any extra plumbing.
     if not running:
         st.info("Start the pipeline to see the live stream.")
     elif not webvis_ready():
@@ -293,6 +293,11 @@ def main():
 
     init_control_state()
     running = is_running(st.session_state.pipeline_process)
+
+    # Unconditional: render_stream()'s Webvis-readiness retry depends on the app rerunning
+    # periodically regardless of what's currently visible (e.g. metrics hidden via the sidebar
+    # toggle), not just while the metrics section happens to be shown.
+    st_autorefresh(interval=2000, key="metrics_refresh")
 
     render_sidebar(running)
 
