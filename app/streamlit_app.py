@@ -16,6 +16,7 @@ from streamlit_autorefresh import st_autorefresh
 
 CONTROL_PATH = "control.json"
 METRICS_PATH = "metrics.json"
+VIRTUAL_CAM_STATUS_PATH = "virtual_cam_status.json"
 WEBVIS_URL = "http://localhost:8000"
 LIVE_PIPELINE_CMD = [sys.executable, "pipelines/live.py"]
 
@@ -27,6 +28,7 @@ DEFAULT_CONTROL = {
     "blur_style": "pixelate",
     "blur_intensity": 15,
     "show_metrics": True,
+    "virtual_cam_enabled": False,
 }
 
 BLUR_STYLES = ["pixelate", "gaussian", "solid"]
@@ -79,6 +81,17 @@ def update_control(updates, path=CONTROL_PATH):
 def read_metrics(path=METRICS_PATH):
     """Read metrics.json, returning {} if it's missing (pipeline not running yet) or not valid JSON
     (Annotator is mid-write)."""
+
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def read_virtual_cam_status(path=VIRTUAL_CAM_STATUS_PATH):
+    """Read virtual_cam_status.json, returning {} if it's missing (filter hasn't run yet, or
+    the toggle has never been turned on) or not valid JSON (filter is mid-write)."""
 
     try:
         with open(path) as f:
@@ -157,6 +170,23 @@ def _write_control_field(field):
     update_control({field: st.session_state[_state_key(field)]})
 
 
+def render_virtual_cam_status():
+    """Show whether VirtualCamOut actually managed to start, reading the status file it writes
+    on every start/stop attempt. Only relevant while the toggle is on — the status file can
+    lag a toggle flip by up to one autorefresh tick (2s), same latency every other control has."""
+
+    if not st.session_state.get(_state_key("virtual_cam_enabled")):
+        return
+
+    status = read_virtual_cam_status()
+    if status.get("error"):
+        st.sidebar.error(f"Virtual camera failed to start: {status['error']}")
+    elif status.get("active"):
+        st.sidebar.caption("Virtual camera: active")
+    else:
+        st.sidebar.caption("Virtual camera: starting…")
+
+
 def render_sidebar(running):
     st.sidebar.header("Pipeline")
 
@@ -218,6 +248,16 @@ def render_sidebar(running):
         key=_state_key("show_metrics"),
         on_change=_write_control_field, args=("show_metrics",),
     )
+
+    st.sidebar.toggle(
+        "Virtual camera (Zoom/Meet)",
+        key=_state_key("virtual_cam_enabled"),
+        on_change=_write_control_field, args=("virtual_cam_enabled",),
+        help="Sends output to the OBS Virtual Camera device, selectable as a webcam in "
+             "Zoom/Meet. Needs OBS Studio installed with its Virtual Camera started at least "
+             "once (see CLAUDE.md).",
+    )
+    render_virtual_cam_status()
 
 
 def confidence_rows(confidence_samples):

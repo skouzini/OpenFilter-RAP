@@ -4,7 +4,7 @@ import socket
 
 from streamlit.testing.v1 import AppTest
 
-from app.streamlit_app import DEFAULT_CONTROL, confidence_rows, is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
+from app.streamlit_app import DEFAULT_CONTROL, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -145,6 +145,68 @@ def test_changing_blur_intensity_persists_correctly(tmp_path, monkeypatch):
 
     on_disk = json.loads((tmp_path / "control.json").read_text())
     assert on_disk["blur_intensity"] == 25
+
+
+def test_read_virtual_cam_status_returns_empty_dict_when_file_missing(tmp_path):
+    assert read_virtual_cam_status(str(tmp_path / "does_not_exist.json")) == {}
+
+
+def test_read_virtual_cam_status_returns_empty_dict_on_malformed_json(tmp_path):
+    status_path = tmp_path / "virtual_cam_status.json"
+    status_path.write_text("not valid json")
+
+    assert read_virtual_cam_status(str(status_path)) == {}
+
+
+def test_read_virtual_cam_status_parses_existing_file(tmp_path):
+    status_path = tmp_path / "virtual_cam_status.json"
+    status_path.write_text(json.dumps({"active": True, "error": None}))
+
+    assert read_virtual_cam_status(str(status_path)) == {"active": True, "error": None}
+
+
+def test_toggling_virtual_cam_persists_to_control_json(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    vcam_toggle = [t for t in at.sidebar.toggle if t.label == "Virtual camera (Zoom/Meet)"][0]
+    vcam_toggle.set_value(True).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["virtual_cam_enabled"] is True
+
+
+def test_virtual_cam_status_hidden_when_toggle_off(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "virtual_cam_status.json").write_text(json.dumps({"active": True, "error": None}))
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert "Virtual camera: active" not in [c.value for c in at.sidebar.caption]
+
+
+def test_virtual_cam_status_shows_active_when_toggle_on(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "virtual_cam_status.json").write_text(json.dumps({"active": True, "error": None}))
+
+    at = AppTest.from_file(APP_PATH).run()
+    vcam_toggle = [t for t in at.sidebar.toggle if t.label == "Virtual camera (Zoom/Meet)"][0]
+    vcam_toggle.set_value(True).run()
+
+    assert "Virtual camera: active" in [c.value for c in at.sidebar.caption]
+
+
+def test_virtual_cam_status_shows_error_when_toggle_on_and_failed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "virtual_cam_status.json").write_text(
+        json.dumps({"active": False, "error": "OBS Virtual Camera is not installed"})
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    vcam_toggle = [t for t in at.sidebar.toggle if t.label == "Virtual camera (Zoom/Meet)"][0]
+    vcam_toggle.set_value(True).run()
+
+    assert any("OBS Virtual Camera is not installed" in e.value for e in at.sidebar.error)
 
 
 def test_changing_one_control_does_not_reset_another(tmp_path, monkeypatch):
