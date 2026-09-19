@@ -9,6 +9,8 @@ dependencies = [
     "pyvirtualcam",
     "streamlit",
     "streamlit-autorefresh",
+    "altair",
+    "pandas",
 ]
 
 [project.optional-dependencies]

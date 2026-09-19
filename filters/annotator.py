@@ -1,10 +1,12 @@
 """Annotator: reads `detections` from frame.data and draws boxes/labels on frame.image,
-skipping any detection PrivacyBlur has pixelated. Also writes metrics.json each frame
-(detection counts by class) for the Streamlit metrics chart to read.
+skipping any detection PrivacyBlur has pixelated. Also writes metrics.json each frame: detection
+counts by class, and each class's detection-confidence samples over a rolling time window, for
+the Streamlit metrics chart to read.
 Minimal for this milestone — no FPS overlay.
 """
 
 import json
+import time
 from collections import Counter
 
 import cv2
@@ -20,9 +22,13 @@ FONT_SCALE = 0.5
 FONT_THICKNESS = 1
 LABEL_TEXT_COLOR = (0, 0, 0)
 METRICS_PATH = "metrics.json"
+CONFIDENCE_WINDOW_SECONDS = 30
 
 
 class Annotator(ControlMixin, Filter):
+    def setup(self, config):
+        self.confidence_samples = []  # [(timestamp, class, score), ...]
+
     def process(self, frames):
         frame = frames["main"].rw
         control = self.get_control()
@@ -32,7 +38,13 @@ class Annotator(ControlMixin, Filter):
         blur_class = control.get("blur_class")
 
         draw_detections(frame.image, visible_detections(detections, blur_enabled, blur_class))
-        write_metrics(class_counts(detections))
+
+        now = time.time()
+        self.confidence_samples = prune_old_samples(
+            self.confidence_samples + [(now, d["class"], d["score"]) for d in detections],
+            now, CONFIDENCE_WINDOW_SECONDS,
+        )
+        write_metrics(class_counts(detections), group_confidences_by_class(self.confidence_samples))
 
         return {"main": frame}
 
@@ -68,9 +80,24 @@ def class_counts(detections):
     return dict(Counter(d["class"] for d in detections))
 
 
-def write_metrics(counts, path=METRICS_PATH):
+def prune_old_samples(samples, now, window_seconds):
+    """Keep only (timestamp, class, score) samples within window_seconds of `now`."""
+
+    return [s for s in samples if now - s[0] <= window_seconds]
+
+
+def group_confidences_by_class(samples):
+    """Group (timestamp, class, score) samples into {class: [score, ...]}."""
+
+    result = {}
+    for _, cls, score in samples:
+        result.setdefault(cls, []).append(score)
+    return result
+
+
+def write_metrics(counts, confidence_samples, path=METRICS_PATH):
     with open(path, "w") as f:
-        json.dump({"class_counts": counts}, f)
+        json.dump({"class_counts": counts, "confidence_samples": confidence_samples}, f)
 
 
 if __name__ == "__main__":

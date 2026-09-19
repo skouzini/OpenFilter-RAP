@@ -9,6 +9,8 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -199,15 +201,32 @@ def render_sidebar(running):
     )
 
 
+def confidence_rows(confidence_samples):
+    """Flatten {class: [score, ...]} into tidy rows for the box plot: [{"class": ..., "confidence": ...}, ...]."""
+
+    return [{"class": cls, "confidence": score} for cls, scores in confidence_samples.items() for score in scores]
+
+
 def render_metrics():
-    st.subheader("Detection counts")
+    st.subheader("Detection confidence (last 30s)")
     st_autorefresh(interval=2000, key="metrics_refresh")
 
-    class_counts = read_metrics().get("class_counts")
-    if class_counts:
-        st.bar_chart(class_counts)
-    else:
-        st.caption("No metrics yet — start the pipeline to see live detection counts.")
+    metrics = read_metrics()
+    counts = metrics.get("class_counts") or {}
+    confidence_samples = metrics.get("confidence_samples") or {}
+
+    if not confidence_samples:
+        st.caption("No metrics yet — start the pipeline to see live detection confidence.")
+        return
+
+    st.metric("Detections (this frame)", sum(counts.values()))
+    st.caption(", ".join(f"{cls}: {n}" for cls, n in counts.items()))
+
+    chart = alt.Chart(pd.DataFrame(confidence_rows(confidence_samples))).mark_boxplot().encode(
+        x=alt.X("class:N", title="Class"),
+        y=alt.Y("confidence:Q", title="Confidence", scale=alt.Scale(domain=[0, 1])),
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 STREAM_HEIGHT = 500

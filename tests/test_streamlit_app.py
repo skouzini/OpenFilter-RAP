@@ -4,7 +4,7 @@ import socket
 
 from streamlit.testing.v1 import AppTest
 
-from app.streamlit_app import DEFAULT_CONTROL, is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
+from app.streamlit_app import DEFAULT_CONTROL, confidence_rows, is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -57,6 +57,20 @@ def test_update_control_creates_file_when_missing(tmp_path):
 
     assert result == {"confidence_threshold": 0.8}
     assert json.loads(control_path.read_text()) == {"confidence_threshold": 0.8}
+
+
+def test_confidence_rows_flattens_samples_into_tidy_rows():
+    samples = {"person": [0.9, 0.7], "car": [0.8]}
+
+    assert confidence_rows(samples) == [
+        {"class": "person", "confidence": 0.9},
+        {"class": "person", "confidence": 0.7},
+        {"class": "car", "confidence": 0.8},
+    ]
+
+
+def test_confidence_rows_returns_empty_list_for_no_samples():
+    assert confidence_rows({}) == []
 
 
 def test_read_metrics_returns_empty_dict_when_file_missing(tmp_path):

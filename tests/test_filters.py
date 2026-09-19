@@ -4,7 +4,7 @@ import os
 import numpy as np
 from openfilter.filter_runtime.filter import Frame
 
-from filters.annotator import class_counts, draw_detections, visible_detections
+from filters.annotator import class_counts, draw_detections, group_confidences_by_class, prune_old_samples, visible_detections
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
 from filters.privacy_blur import blur_frame, pixelate_region
@@ -181,6 +181,42 @@ def test_class_counts_tallies_detections_by_class():
 
 def test_class_counts_returns_empty_dict_for_no_detections():
     assert class_counts([]) == {}
+
+
+def test_prune_old_samples_keeps_samples_within_window():
+    samples = [(100.0, "person", 0.9), (110.0, "car", 0.8)]
+
+    result = prune_old_samples(samples, now=120.0, window_seconds=30)
+
+    assert result == samples
+
+
+def test_prune_old_samples_drops_samples_older_than_window():
+    samples = [(80.0, "person", 0.9), (110.0, "car", 0.8)]
+
+    result = prune_old_samples(samples, now=120.0, window_seconds=30)
+
+    assert result == [(110.0, "car", 0.8)]
+
+
+def test_prune_old_samples_keeps_sample_exactly_at_window_boundary():
+    samples = [(90.0, "person", 0.9)]
+
+    result = prune_old_samples(samples, now=120.0, window_seconds=30)
+
+    assert result == samples
+
+
+def test_group_confidences_by_class_groups_scores_by_class():
+    samples = [(1.0, "person", 0.9), (2.0, "person", 0.7), (3.0, "car", 0.8)]
+
+    result = group_confidences_by_class(samples)
+
+    assert result == {"person": [0.9, 0.7], "car": [0.8]}
+
+
+def test_group_confidences_by_class_returns_empty_dict_for_no_samples():
+    assert group_confidences_by_class([]) == {}
 
 
 def test_get_control_parses_valid_json(tmp_path):
