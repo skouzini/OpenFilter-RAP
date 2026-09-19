@@ -222,7 +222,10 @@ def render_metrics():
     st.metric("Detections (this frame)", sum(counts.values()))
     st.caption(", ".join(f"{cls}: {n}" for cls, n in counts.items()))
 
-    chart = alt.Chart(pd.DataFrame(confidence_rows(confidence_samples))).mark_boxplot().encode(
+    chart = alt.Chart(pd.DataFrame(confidence_rows(confidence_samples))).mark_boxplot(
+        median={"color": "black"},
+        rule={"color": "white"},
+    ).encode(
         x=alt.X("class:N", title="Class"),
         y=alt.Y("confidence:Q", title="Confidence", scale=alt.Scale(domain=[0, 1])),
     )
