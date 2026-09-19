@@ -1,7 +1,12 @@
 import json
+import os
 import socket
 
-from app.streamlit_app import is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
+from streamlit.testing.v1 import AppTest
+
+from app.streamlit_app import DEFAULT_CONTROL, confidence_rows, is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
+
+APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
 
 def test_merge_control_overlays_updates_onto_existing():
@@ -54,6 +59,20 @@ def test_update_control_creates_file_when_missing(tmp_path):
     assert json.loads(control_path.read_text()) == {"confidence_threshold": 0.8}
 
 
+def test_confidence_rows_flattens_samples_into_tidy_rows():
+    samples = {"person": [0.9, 0.7], "car": [0.8]}
+
+    assert confidence_rows(samples) == [
+        {"class": "person", "confidence": 0.9},
+        {"class": "person", "confidence": 0.7},
+        {"class": "car", "confidence": 0.8},
+    ]
+
+
+def test_confidence_rows_returns_empty_list_for_no_samples():
+    assert confidence_rows({}) == []
+
+
 def test_read_metrics_returns_empty_dict_when_file_missing(tmp_path):
     assert read_metrics(str(tmp_path / "metrics.json")) == {}
 
@@ -70,6 +89,77 @@ def test_read_metrics_parses_existing_file(tmp_path):
     metrics_path.write_text(json.dumps({"class_counts": {"person": 2}}))
 
     assert read_metrics(str(metrics_path)) == {"class_counts": {"person": 2}}
+
+
+def test_app_seeds_control_json_with_defaults_on_first_load(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    AppTest.from_file(APP_PATH).run()
+
+    assert json.loads((tmp_path / "control.json").read_text()) == DEFAULT_CONTROL
+
+
+def test_app_preserves_existing_control_values_on_first_load(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"confidence_threshold": 0.9}))
+
+    AppTest.from_file(APP_PATH).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["confidence_threshold"] == 0.9
+    assert on_disk["active_classes"] == DEFAULT_CONTROL["active_classes"]
+
+
+def test_metrics_section_hidden_when_show_metrics_toggled_off(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "metrics.json").write_text(
+        json.dumps({"class_counts": {"person": 2}, "confidence_samples": {"person": [0.8, 0.9]}})
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    assert "Detection confidence (last 30s)" in [s.value for s in at.subheader]
+
+    show_metrics_toggle = [t for t in at.sidebar.toggle if t.label == "Show metrics overlay"][0]
+    show_metrics_toggle.set_value(False).run()
+
+    assert "Detection confidence (last 30s)" not in [s.value for s in at.subheader]
+
+
+def test_changing_blur_style_persists_correctly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    style_select = [s for s in at.sidebar.selectbox if s.label == "Blur style"][0]
+    style_select.set_value("gaussian").run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_style"] == "gaussian"
+
+
+def test_changing_blur_intensity_persists_correctly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    intensity_slider = [s for s in at.sidebar.slider if s.label == "Blur intensity"][0]
+    intensity_slider.set_value(25).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_intensity"] == 25
+
+
+def test_changing_one_control_does_not_reset_another(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    at = AppTest.from_file(APP_PATH).run()
+    blur_toggle = [t for t in at.sidebar.toggle if t.label == "Privacy blur"][0]
+    blur_toggle.set_value(True).run()
+
+    multiselect = at.sidebar.multiselect[0]
+    multiselect.set_value(["person"]).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_enabled"] is True
+    assert on_disk["active_classes"] == ["person"]
 
 
 class FakeProcess:

@@ -9,6 +9,8 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -22,8 +24,12 @@ DEFAULT_CONTROL = {
     "active_classes": ["person", "car", "laptop"],
     "blur_enabled": False,
     "blur_class": "person",
+    "blur_style": "pixelate",
+    "blur_intensity": 15,
     "show_metrics": True,
 }
+
+BLUR_STYLES = ["pixelate", "gaussian", "solid"]
 
 # COCO classes YOLOv8n (used by filters/detector.py) was pretrained on.
 COCO_CLASSES = [
@@ -71,9 +77,8 @@ def update_control(updates, path=CONTROL_PATH):
 
 
 def read_metrics(path=METRICS_PATH):
-    """Read metrics.json, returning {} if it's missing or not valid JSON yet (Annotator doesn't write it until
-    the PrivacyBlur + metrics milestone).
-    """
+    """Read metrics.json, returning {} if it's missing (pipeline not running yet) or not valid JSON
+    (Annotator is mid-write)."""
 
     try:
         with open(path) as f:
@@ -118,7 +123,41 @@ def stop_pipeline(process):
         process.wait()
 
 
-def render_sidebar(current, running):
+def _state_key(field):
+    return f"control_{field}"
+
+
+def init_control_state():
+    """Seed st.session_state (and control.json) from whatever's already on disk, filled in
+    with DEFAULT_CONTROL for anything missing — once per browser session. After this,
+    st.session_state is the single source of truth for widget values, so widgets below never
+    re-derive their displayed value from control.json on every rerun (that pattern is what let
+    a stale disk snapshot clobber a just-written value when two controls changed in close
+    succession); control.json is only written from here on by the on_change callbacks, in
+    direct response to an actual user edit.
+    """
+
+    if st.session_state.get("control_initialized"):
+        return
+
+    current = merge_control(DEFAULT_CONTROL, read_control())
+    if current["blur_class"] not in COCO_CLASSES:
+        current["blur_class"] = DEFAULT_CONTROL["blur_class"]
+    if current["blur_style"] not in BLUR_STYLES:
+        current["blur_style"] = DEFAULT_CONTROL["blur_style"]
+
+    for field, value in current.items():
+        st.session_state[_state_key(field)] = value
+
+    write_control(current)
+    st.session_state.control_initialized = True
+
+
+def _write_control_field(field):
+    update_control({field: st.session_state[_state_key(field)]})
+
+
+def render_sidebar(running):
     st.sidebar.header("Pipeline")
 
     webcam = st.sidebar.checkbox("Use webcam", value=False, disabled=running)
@@ -137,41 +176,81 @@ def render_sidebar(current, running):
 
     st.sidebar.header("Controls")
 
-    confidence = st.sidebar.slider(
-        "Confidence threshold", 0.0, 1.0, float(current["confidence_threshold"]), 0.05,
+    st.sidebar.slider(
+        "Confidence threshold", 0.0, 1.0, step=0.05,
+        key=_state_key("confidence_threshold"),
+        on_change=_write_control_field, args=("confidence_threshold",),
     )
-    if confidence != current["confidence_threshold"]:
-        update_control({"confidence_threshold": confidence})
 
-    active_classes = st.sidebar.multiselect(
-        "Active classes", COCO_CLASSES, default=current["active_classes"],
+    st.sidebar.multiselect(
+        "Active classes", COCO_CLASSES,
+        key=_state_key("active_classes"),
+        on_change=_write_control_field, args=("active_classes",),
     )
-    if active_classes != current["active_classes"]:
-        update_control({"active_classes": active_classes})
 
-    blur_enabled = st.sidebar.toggle("Privacy blur", value=bool(current["blur_enabled"]))
-    if blur_enabled != current["blur_enabled"]:
-        update_control({"blur_enabled": blur_enabled})
+    st.sidebar.toggle(
+        "Privacy blur",
+        key=_state_key("blur_enabled"),
+        on_change=_write_control_field, args=("blur_enabled",),
+    )
 
-    blur_class_index = COCO_CLASSES.index(current["blur_class"]) if current["blur_class"] in COCO_CLASSES else 0
-    blur_class = st.sidebar.selectbox("Blur class", COCO_CLASSES, index=blur_class_index)
-    if blur_class != current["blur_class"]:
-        update_control({"blur_class": blur_class})
+    st.sidebar.selectbox(
+        "Blur class", COCO_CLASSES,
+        key=_state_key("blur_class"),
+        on_change=_write_control_field, args=("blur_class",),
+    )
 
-    show_metrics = st.sidebar.toggle("Show metrics overlay", value=bool(current["show_metrics"]))
-    if show_metrics != current["show_metrics"]:
-        update_control({"show_metrics": show_metrics})
+    st.sidebar.selectbox(
+        "Blur style", BLUR_STYLES,
+        key=_state_key("blur_style"),
+        on_change=_write_control_field, args=("blur_style",),
+    )
+
+    st.sidebar.slider(
+        "Blur intensity", 3, 41, step=1,
+        key=_state_key("blur_intensity"),
+        on_change=_write_control_field, args=("blur_intensity",),
+        help="Block size (pixelate) or blur strength (gaussian). Has no effect on solid fill.",
+    )
+
+    st.sidebar.toggle(
+        "Show metrics overlay",
+        key=_state_key("show_metrics"),
+        on_change=_write_control_field, args=("show_metrics",),
+    )
+
+
+def confidence_rows(confidence_samples):
+    """Flatten {class: [score, ...]} into tidy rows for the box plot: [{"class": ..., "confidence": ...}, ...]."""
+
+    return [{"class": cls, "confidence": score} for cls, scores in confidence_samples.items() for score in scores]
 
 
 def render_metrics():
-    st.subheader("Detection counts")
-    st_autorefresh(interval=2000, key="metrics_refresh")
+    if not st.session_state.get(_state_key("show_metrics"), True):
+        return
 
-    class_counts = read_metrics().get("class_counts")
-    if class_counts:
-        st.bar_chart(class_counts)
-    else:
-        st.caption("No metrics yet — metrics.json isn't written until the PrivacyBlur + metrics milestone.")
+    st.subheader("Detection confidence (last 30s)")
+
+    metrics = read_metrics()
+    counts = metrics.get("class_counts") or {}
+    confidence_samples = metrics.get("confidence_samples") or {}
+
+    if not confidence_samples:
+        st.caption("No metrics yet — start the pipeline to see live detection confidence.")
+        return
+
+    st.metric("Detections (this frame)", sum(counts.values()))
+    st.caption(", ".join(f"{cls}: {n}" for cls, n in counts.items()))
+
+    chart = alt.Chart(pd.DataFrame(confidence_rows(confidence_samples))).mark_boxplot(
+        median={"color": "black"},
+        rule={"color": "white"},
+    ).encode(
+        x=alt.X("class:N", title="Class"),
+        y=alt.Y("confidence:Q", title="Confidence", scale=alt.Scale(domain=[0, 1])),
+    )
+    st.altair_chart(chart, width="stretch")
 
 
 STREAM_HEIGHT = 500
@@ -181,8 +260,9 @@ def render_stream(running):
     # Only mount the iframe once Webvis is actually reachable: if it's inserted while the
     # server refuses connections, the browser caches that connection-refused navigation on the
     # iframe and never retries it, even after Webvis comes up later in the same session. The
-    # st_autorefresh in render_metrics() keeps rerunning the script every 2s, so this recheck
-    # resolves on its own without any extra plumbing.
+    # st_autorefresh in main() keeps rerunning the script every 2s — unconditionally, not tied to
+    # whether the metrics section happens to be visible — so this recheck resolves on its own
+    # without any extra plumbing.
     if not running:
         st.info("Start the pipeline to see the live stream.")
     elif not webvis_ready():
@@ -211,10 +291,15 @@ def main():
     if "pipeline_process" not in st.session_state:
         st.session_state.pipeline_process = None
 
+    init_control_state()
     running = is_running(st.session_state.pipeline_process)
-    current = merge_control(DEFAULT_CONTROL, read_control())
 
-    render_sidebar(current, running)
+    # Unconditional: render_stream()'s Webvis-readiness retry depends on the app rerunning
+    # periodically regardless of what's currently visible (e.g. metrics hidden via the sidebar
+    # toggle), not just while the metrics section happens to be shown.
+    st_autorefresh(interval=2000, key="metrics_refresh")
+
+    render_sidebar(running)
 
     render_stream(running)
 

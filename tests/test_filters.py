@@ -2,10 +2,12 @@ import json
 import os
 
 import numpy as np
+from openfilter.filter_runtime.filter import Frame
 
-from filters.annotator import draw_detections
+from filters.annotator import class_counts, draw_detections, group_confidences_by_class, prune_old_samples, visible_detections
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
+from filters.privacy_blur import blur_frame, blur_region, gaussian_blur_region, pixelate_region, solid_fill_region
 
 
 class FakeTensor(list):
@@ -89,6 +91,264 @@ def test_filter_detections_returns_all_when_active_classes_none():
     detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
 
     assert filter_detections(detections, None) == detections
+
+
+def test_pixelate_region_makes_each_block_uniform():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+
+    pixelate_region(image, [10, 10, 30, 30], block_size=10)
+
+    region = image[10:30, 10:30, 0]
+    for by in range(0, 20, 10):
+        for bx in range(0, 20, 10):
+            block = region[by:by + 10, bx:bx + 10]
+            assert (block == block[0, 0]).all()
+
+
+def test_pixelate_region_leaves_pixels_outside_box_unchanged():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[35, 35] = (7, 8, 9)
+
+    pixelate_region(image, [10, 10, 30, 30], block_size=10)
+
+    assert tuple(image[35, 35]) == (7, 8, 9)
+
+
+def test_pixelate_region_returns_the_image():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    result = pixelate_region(image, [10, 10, 30, 30], block_size=10)
+
+    assert result is image
+
+
+def test_solid_fill_region_fills_box_with_color():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+
+    solid_fill_region(image, [10, 10, 30, 30], color=(0, 0, 0))
+
+    assert (image[10:30, 10:30] == 0).all()
+
+
+def test_solid_fill_region_defaults_to_black():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+
+    solid_fill_region(image, [10, 10, 30, 30])
+
+    assert (image[10:30, 10:30] == 0).all()
+
+
+def test_solid_fill_region_leaves_pixels_outside_box_unchanged():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[35, 35] = (7, 8, 9)
+
+    solid_fill_region(image, [10, 10, 30, 30])
+
+    assert tuple(image[35, 35]) == (7, 8, 9)
+
+
+def test_solid_fill_region_returns_the_image():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    result = solid_fill_region(image, [10, 10, 30, 30])
+
+    assert result is image
+
+
+def test_gaussian_blur_region_smooths_an_impulse():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[19, 19] = (255, 255, 255)
+
+    gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
+
+    assert image[19, 19, 0] < 255
+    assert image[19, 20, 0] > 0
+
+
+def test_gaussian_blur_region_leaves_pixels_outside_box_unchanged():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[35, 35] = (7, 8, 9)
+
+    gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
+
+    assert tuple(image[35, 35]) == (7, 8, 9)
+
+
+def test_gaussian_blur_region_high_intensity_blurs_much_more_than_low_intensity():
+    def make_image():
+        image = np.zeros((60, 60, 3), dtype=np.uint8)
+        image[20:40, 20:40] = 255
+        return image
+
+    box = [5, 5, 55, 55]
+    low, high = make_image(), make_image()
+
+    gaussian_blur_region(low, box, intensity=3)
+    gaussian_blur_region(high, box, intensity=41)
+
+    low_variance = low[5:55, 5:55].astype(float).var()
+    high_variance = high[5:55, 5:55].astype(float).var()
+
+    # the slider should sweep from "barely blurred" to "nearly flat" across its range,
+    # not just shave a little off the top
+    assert high_variance < low_variance * 0.15
+
+
+def test_gaussian_blur_region_returns_the_image():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    result = gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
+
+    assert result is image
+
+
+def test_blur_region_dispatches_to_pixelate():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+
+    blur_region(image, [10, 10, 30, 30], "pixelate", 10)
+
+    block = image[10:20, 10:20, 0]
+    assert (block == block[0, 0]).all()
+
+
+def test_blur_region_dispatches_to_gaussian():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[19, 19] = (255, 255, 255)
+
+    blur_region(image, [10, 10, 30, 30], "gaussian", 9)
+
+    assert image[19, 19, 0] < 255
+
+
+def test_blur_region_dispatches_to_solid():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+
+    blur_region(image, [10, 10, 30, 30], "solid", 15)
+
+    assert (image[10:30, 10:30] == 0).all()
+
+
+def test_blur_region_falls_back_to_pixelate_for_unknown_style():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+
+    blur_region(image, [10, 10, 30, 30], "not-a-real-style", 10)
+
+    block = image[10:20, 10:20, 0]
+    assert (block == block[0, 0]).all()
+
+
+def test_blur_frame_pixelates_matching_detection_on_readonly_frame():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+    image.flags.writeable = False  # frames arriving from another filter over the wire are read-only
+    frame = Frame(image, {}, "BGR")
+    detections = [{"class": "person", "box": [10, 10, 30, 30], "score": 0.9}]
+
+    result = blur_frame(frame, detections, "person")
+
+    block = result.image[10:25, 10:25, 0]
+    assert (block == block[0, 0]).all()
+
+
+def test_blur_frame_honors_explicit_style_and_intensity():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+    image.flags.writeable = False
+    frame = Frame(image, {}, "BGR")
+    detections = [{"class": "person", "box": [10, 10, 30, 30], "score": 0.9}]
+
+    result = blur_frame(frame, detections, "person", style="solid", intensity=15)
+
+    assert (result.image[10:30, 10:30] == 0).all()
+
+
+def test_blur_frame_leaves_non_matching_detections_unpixelated():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+    image.flags.writeable = False
+    frame = Frame(image, {}, "BGR")
+    detections = [{"class": "car", "box": [10, 10, 30, 30], "score": 0.9}]
+
+    result = blur_frame(frame, detections, "person")
+
+    block = result.image[10:25, 10:25, 0]
+    assert not (block == block[0, 0]).all()
+
+
+def test_visible_detections_excludes_blurred_class_when_enabled():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}, {"class": "car", "box": [0, 0, 1, 1], "score": 0.8}]
+
+    result = visible_detections(detections, blur_enabled=True, blur_class="person")
+
+    assert result == [{"class": "car", "box": [0, 0, 1, 1], "score": 0.8}]
+
+
+def test_visible_detections_returns_all_when_blur_disabled():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
+
+    result = visible_detections(detections, blur_enabled=False, blur_class="person")
+
+    assert result == detections
+
+
+def test_visible_detections_returns_all_when_blur_class_has_no_match():
+    detections = [{"class": "car", "box": [0, 0, 1, 1], "score": 0.9}]
+
+    result = visible_detections(detections, blur_enabled=True, blur_class="person")
+
+    assert result == detections
+
+
+def test_class_counts_tallies_detections_by_class():
+    detections = [{"class": "person"}, {"class": "person"}, {"class": "car"}]
+
+    assert class_counts(detections) == {"person": 2, "car": 1}
+
+
+def test_class_counts_returns_empty_dict_for_no_detections():
+    assert class_counts([]) == {}
+
+
+def test_prune_old_samples_keeps_samples_within_window():
+    samples = [(100.0, "person", 0.9), (110.0, "car", 0.8)]
+
+    result = prune_old_samples(samples, now=120.0, window_seconds=30)
+
+    assert result == samples
+
+
+def test_prune_old_samples_drops_samples_older_than_window():
+    samples = [(80.0, "person", 0.9), (110.0, "car", 0.8)]
+
+    result = prune_old_samples(samples, now=120.0, window_seconds=30)
+
+    assert result == [(110.0, "car", 0.8)]
+
+
+def test_prune_old_samples_keeps_sample_exactly_at_window_boundary():
+    samples = [(90.0, "person", 0.9)]
+
+    result = prune_old_samples(samples, now=120.0, window_seconds=30)
+
+    assert result == samples
+
+
+def test_group_confidences_by_class_groups_scores_by_class():
+    samples = [(1.0, "person", 0.9), (2.0, "person", 0.7), (3.0, "car", 0.8)]
+
+    result = group_confidences_by_class(samples)
+
+    assert result == {"person": [0.9, 0.7], "car": [0.8]}
+
+
+def test_group_confidences_by_class_returns_empty_dict_for_no_samples():
+    assert group_confidences_by_class([]) == {}
 
 
 def test_get_control_parses_valid_json(tmp_path):
