@@ -1,7 +1,11 @@
+import json
+import os
+
 import numpy as np
 
 from filters.annotator import draw_detections
-from filters.detector import boxes_to_detections
+from filters.control import ControlMixin
+from filters.detector import boxes_to_detections, filter_detections
 
 
 class FakeTensor(list):
@@ -65,3 +69,93 @@ def test_draw_detections_leaves_image_unchanged_with_no_detections():
     draw_detections(image, [])
 
     assert not image.any()
+
+
+def test_filter_detections_keeps_only_active_classes():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}, {"class": "dog", "box": [0, 0, 1, 1], "score": 0.8}]
+
+    result = filter_detections(detections, ["person"])
+
+    assert result == [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
+
+
+def test_filter_detections_returns_all_when_active_classes_empty():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
+
+    assert filter_detections(detections, []) == detections
+
+
+def test_filter_detections_returns_all_when_active_classes_none():
+    detections = [{"class": "person", "box": [0, 0, 1, 1], "score": 0.9}]
+
+    assert filter_detections(detections, None) == detections
+
+
+def test_get_control_parses_valid_json(tmp_path):
+    control_path = tmp_path / "control.json"
+    control_path.write_text(json.dumps({"confidence_threshold": 0.7}))
+
+    mixin = ControlMixin()
+    mixin._control_path = str(control_path)
+
+    assert mixin.get_control() == {"confidence_threshold": 0.7}
+
+
+def test_get_control_returns_cached_value_when_mtime_unchanged(tmp_path):
+    control_path = tmp_path / "control.json"
+    control_path.write_text(json.dumps({"confidence_threshold": 0.5}))
+
+    mixin = ControlMixin()
+    mixin._control_path = str(control_path)
+
+    first = mixin.get_control()
+    original_mtime = os.path.getmtime(control_path)
+
+    control_path.write_text(json.dumps({"confidence_threshold": 0.9}))
+    os.utime(control_path, (original_mtime, original_mtime))
+
+    second = mixin.get_control()
+
+    assert first == {"confidence_threshold": 0.5}
+    assert second == {"confidence_threshold": 0.5}
+
+
+def test_get_control_picks_up_new_content_when_file_changes(tmp_path):
+    control_path = tmp_path / "control.json"
+    control_path.write_text(json.dumps({"confidence_threshold": 0.5}))
+
+    mixin = ControlMixin()
+    mixin._control_path = str(control_path)
+
+    first = mixin.get_control()
+
+    original_mtime = os.path.getmtime(control_path)
+    control_path.write_text(json.dumps({"confidence_threshold": 0.9}))
+    os.utime(control_path, (original_mtime + 5, original_mtime + 5))
+
+    second = mixin.get_control()
+
+    assert first == {"confidence_threshold": 0.5}
+    assert second == {"confidence_threshold": 0.9}
+
+
+def test_get_control_handles_missing_file_gracefully(tmp_path):
+    mixin = ControlMixin()
+    mixin._control_path = str(tmp_path / "does_not_exist.json")
+
+    assert mixin.get_control() == {}
+
+
+def test_get_control_keeps_last_known_value_when_file_disappears(tmp_path):
+    control_path = tmp_path / "control.json"
+    control_path.write_text(json.dumps({"confidence_threshold": 0.5}))
+
+    mixin = ControlMixin()
+    mixin._control_path = str(control_path)
+
+    first = mixin.get_control()
+    control_path.unlink()
+    second = mixin.get_control()
+
+    assert first == {"confidence_threshold": 0.5}
+    assert second == {"confidence_threshold": 0.5}

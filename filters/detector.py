@@ -7,13 +7,15 @@ import logging
 from openfilter.filter_runtime.filter import Filter, Frame
 from ultralytics import YOLO
 
+from filters.control import ControlMixin
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 DEVICE = "mps"
 
 
-class Detector(Filter):
+class Detector(ControlMixin, Filter):
     def setup(self, config):
         self.confidence_threshold = float(config.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
 
@@ -27,12 +29,16 @@ class Detector(Filter):
 
     def process(self, frames):
         frame = frames["main"]
+        control = self.get_control()
+
+        confidence_threshold = float(control.get("confidence_threshold", self.confidence_threshold))
+        active_classes = control.get("active_classes")
 
         results = self.model.predict(
-            frame.bgr.image, device=DEVICE, conf=self.confidence_threshold, verbose=False,
+            frame.bgr.image, device=DEVICE, conf=confidence_threshold, verbose=False,
         )[0]
 
-        detections = boxes_to_detections(results)
+        detections = filter_detections(boxes_to_detections(results), active_classes)
 
         return {"main": Frame(frame.image, dict(frame.data, detections=detections), frame.format)}
 
@@ -50,6 +56,15 @@ def boxes_to_detections(results):
         }
         for box in results.boxes
     ]
+
+
+def filter_detections(detections, active_classes):
+    """Keep only detections whose class is in active_classes. No filtering if active_classes is empty/None."""
+
+    if not active_classes:
+        return detections
+
+    return [d for d in detections if d["class"] in active_classes]
 
 
 if __name__ == "__main__":
