@@ -208,6 +208,9 @@ def confidence_rows(confidence_samples):
 
 
 def render_metrics():
+    if not st.session_state.get(_state_key("show_metrics"), True):
+        return
+
     st.subheader("Detection confidence (last 30s)")
     st_autorefresh(interval=2000, key="metrics_refresh")
 
@@ -229,7 +232,7 @@ def render_metrics():
         x=alt.X("class:N", title="Class"),
         y=alt.Y("confidence:Q", title="Confidence", scale=alt.Scale(domain=[0, 1])),
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 STREAM_HEIGHT = 500

@@ -110,6 +110,21 @@ def test_app_preserves_existing_control_values_on_first_load(tmp_path, monkeypat
     assert on_disk["active_classes"] == DEFAULT_CONTROL["active_classes"]
 
 
+def test_metrics_section_hidden_when_show_metrics_toggled_off(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "metrics.json").write_text(
+        json.dumps({"class_counts": {"person": 2}, "confidence_samples": {"person": [0.8, 0.9]}})
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    assert "Detection confidence (last 30s)" in [s.value for s in at.subheader]
+
+    show_metrics_toggle = [t for t in at.sidebar.toggle if t.label == "Show metrics overlay"][0]
+    show_metrics_toggle.set_value(False).run()
+
+    assert "Detection confidence (last 30s)" not in [s.value for s in at.subheader]
+
+
 def test_changing_one_control_does_not_reset_another(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
