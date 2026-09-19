@@ -4,8 +4,10 @@ ControlMixin — see filters/control.py), and embed Webvis's own MJPEG stream.
 """
 
 import json
+import socket
 import subprocess
 import sys
+from urllib.parse import urlparse
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -84,6 +86,22 @@ def is_running(process):
     return process is not None and process.poll() is None
 
 
+def webvis_ready(url=WEBVIS_URL, timeout=0.2):
+    """Cheap readiness probe: can we open a TCP connection to Webvis yet?
+
+    The pipeline subprocess being alive (is_running) doesn't mean Webvis is listening yet —
+    YOLO takes a few seconds to load. Gate the iframe on this instead of just `running`, so it's
+    never inserted before the server can answer it.
+    """
+
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def start_pipeline(webcam=False, webcam_index=0):
     args = list(LIVE_PIPELINE_CMD)
     if webcam:
@@ -107,10 +125,10 @@ def render_sidebar(current, running):
     webcam_index = st.sidebar.number_input("Webcam index", min_value=0, value=0, step=1, disabled=running)
 
     start_col, stop_col = st.sidebar.columns(2)
-    if start_col.button("Start", disabled=running, use_container_width=True):
+    if start_col.button("Start", disabled=running, width="stretch"):
         st.session_state.pipeline_process = start_pipeline(webcam, int(webcam_index))
         st.rerun()
-    if stop_col.button("Stop", disabled=not running, use_container_width=True):
+    if stop_col.button("Stop", disabled=not running, width="stretch"):
         stop_pipeline(st.session_state.pipeline_process)
         st.session_state.pipeline_process = None
         st.rerun()
@@ -156,6 +174,20 @@ def render_metrics():
         st.caption("No metrics yet — metrics.json isn't written until the PrivacyBlur + metrics milestone.")
 
 
+def render_stream(running):
+    # Only mount the iframe once Webvis is actually reachable: if it's inserted while the
+    # server refuses connections, the browser caches that connection-refused navigation on the
+    # iframe and never retries it, even after Webvis comes up later in the same session. The
+    # st_autorefresh in render_metrics() keeps rerunning the script every 2s, so this recheck
+    # resolves on its own without any extra plumbing.
+    if not running:
+        st.info("Start the pipeline to see the live stream.")
+    elif not webvis_ready():
+        st.info("Pipeline starting — waiting for the video stream...")
+    else:
+        st.iframe(WEBVIS_URL, height=500)
+
+
 def main():
     st.set_page_config(page_title="OpenFilter RAP", layout="wide")
     st.title("OpenFilter RAP — Live Pipeline")
@@ -168,7 +200,7 @@ def main():
 
     render_sidebar(current, running)
 
-    st.iframe(WEBVIS_URL, height=500)
+    render_stream(running)
 
     render_metrics()
 

@@ -1,6 +1,7 @@
 import json
+import socket
 
-from app.streamlit_app import is_running, merge_control, read_control, read_metrics, update_control
+from app.streamlit_app import is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
 
 
 def test_merge_control_overlays_updates_onto_existing():
@@ -89,3 +90,24 @@ def test_is_running_true_when_process_has_not_exited():
 
 def test_is_running_false_when_process_has_exited():
     assert is_running(FakeProcess(running=False)) is False
+
+
+def test_webvis_ready_true_when_something_is_listening():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("localhost", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    try:
+        assert webvis_ready(url=f"http://localhost:{port}") is True
+    finally:
+        server.close()
+
+
+def test_webvis_ready_false_when_nothing_is_listening():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("localhost", 0))
+    port = server.getsockname()[1]
+    server.close()  # bound and released, so the port is free but nothing is listening on it
+
+    assert webvis_ready(url=f"http://localhost:{port}") is False
