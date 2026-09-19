@@ -1,4 +1,4 @@
-"""Stage 1: framework smoke test. VideoIn -> Webvis, no custom filters yet.
+"""Stage 2: Detector wired in. VideoIn -> Detector -> Annotator -> Webvis.
 
 Source defaults to the looped sample video so this runs without a webcam;
 pass --webcam to use a live camera instead once camera access is confirmed.
@@ -12,6 +12,9 @@ import argparse
 from openfilter.filter_runtime.filter import Filter
 from openfilter.filter_runtime.filters.video_in import VideoIn
 from openfilter.filter_runtime.filters.webvis import Webvis
+
+from filters.annotator import Annotator
+from filters.detector import Detector
 
 SAMPLE_VIDEO = "assets/sample_video.mp4"
 
@@ -30,9 +33,19 @@ def main():
             sources=source,
             outputs="tcp://*:5550",
         )),
+        (Detector, dict(
+            id="detector",
+            sources="tcp://127.0.0.1:5550",
+            outputs="tcp://*:5552",
+        )),
+        (Annotator, dict(
+            id="annotator",
+            sources="tcp://127.0.0.1:5552",
+            outputs="tcp://*:5554",
+        )),
         (Webvis, dict(
             id="webvis",
-            sources="tcp://127.0.0.1:5550",
+            sources="tcp://127.0.0.1:5554",
             outputs="http://0.0.0.0:8000",
         )),
     ])
