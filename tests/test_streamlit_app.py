@@ -1,7 +1,12 @@
 import json
+import os
 import socket
 
-from app.streamlit_app import is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
+from streamlit.testing.v1 import AppTest
+
+from app.streamlit_app import DEFAULT_CONTROL, is_running, merge_control, read_control, read_metrics, update_control, webvis_ready
+
+APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
 
 def test_merge_control_overlays_updates_onto_existing():
@@ -70,6 +75,40 @@ def test_read_metrics_parses_existing_file(tmp_path):
     metrics_path.write_text(json.dumps({"class_counts": {"person": 2}}))
 
     assert read_metrics(str(metrics_path)) == {"class_counts": {"person": 2}}
+
+
+def test_app_seeds_control_json_with_defaults_on_first_load(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    AppTest.from_file(APP_PATH).run()
+
+    assert json.loads((tmp_path / "control.json").read_text()) == DEFAULT_CONTROL
+
+
+def test_app_preserves_existing_control_values_on_first_load(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"confidence_threshold": 0.9}))
+
+    AppTest.from_file(APP_PATH).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["confidence_threshold"] == 0.9
+    assert on_disk["active_classes"] == DEFAULT_CONTROL["active_classes"]
+
+
+def test_changing_one_control_does_not_reset_another(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    at = AppTest.from_file(APP_PATH).run()
+    blur_toggle = [t for t in at.sidebar.toggle if t.label == "Privacy blur"][0]
+    blur_toggle.set_value(True).run()
+
+    multiselect = at.sidebar.multiselect[0]
+    multiselect.set_value(["person"]).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_enabled"] is True
+    assert on_disk["active_classes"] == ["person"]
 
 
 class FakeProcess:
