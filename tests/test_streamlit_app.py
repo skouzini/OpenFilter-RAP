@@ -1,10 +1,11 @@
 import json
 import os
 import socket
+import sys
 
 from streamlit.testing.v1 import AppTest
 
-from app.streamlit_app import DEFAULT_CONTROL, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, update_control, webvis_ready
+from app.streamlit_app import DEFAULT_CONTROL, build_batch_args, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, sanitized_upload_filename, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -256,6 +257,23 @@ def test_webvis_ready_true_when_something_is_listening():
         server.close()
 
 
+def test_sanitized_upload_filename_keeps_extension_discards_rest():
+    assert sanitized_upload_filename("../../etc/passwd.png") == "upload.png"
+
+
+def test_sanitized_upload_filename_lowercases_extension():
+    assert sanitized_upload_filename("photo.JPG") == "upload.jpg"
+
+
+def test_build_batch_args_includes_input_and_output_dirs():
+    args = build_batch_args("/tmp/in", "/tmp/out")
+
+    assert args[-4:] == ["--input-dir", "/tmp/in", "--output-dir", "/tmp/out"]
+    assert args[0] == sys.executable
+    assert args[1].endswith(os.path.join("pipelines", "batch.py"))
+    assert os.path.isabs(args[1])
+
+
 def test_webvis_ready_false_when_nothing_is_listening():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("localhost", 0))
@@ -263,3 +281,28 @@ def test_webvis_ready_false_when_nothing_is_listening():
     server.close()  # bound and released, so the port is free but nothing is listening on it
 
     assert webvis_ready(url=f"http://localhost:{port}") is False
+
+
+def test_batch_tab_runs_pipeline_and_shows_both_images(tmp_path, monkeypatch):
+    """Real, no-mock: uploads an actual image through AppTest's file_uploader simulation, lets
+    it invoke the real pipelines/batch.py subprocess, and asserts both images render. Slow
+    (loads YOLO) — this is intentionally the one Tab-2 test that pays that cost; everything else
+    exercises the pure argument-building/naming helpers instead.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    import cv2
+
+    repo_root = os.path.dirname(os.path.dirname(APP_PATH))
+    cap = cv2.VideoCapture(os.path.join(repo_root, "assets", "sample_video.mp4"))
+    ok, frame = cap.read()
+    cap.release()
+    assert ok
+    ok, encoded = cv2.imencode(".png", frame)
+    assert ok
+
+    at = AppTest.from_file(APP_PATH).run()
+    uploader = at.file_uploader[0]
+    uploader.set_value(("frame.png", encoded.tobytes(), "image/png")).run(timeout=120)
+
+    assert len(at.image) >= 2

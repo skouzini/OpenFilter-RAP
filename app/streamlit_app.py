@@ -4,9 +4,11 @@ ControlMixin — see filters/control.py), and embed Webvis's own MJPEG stream.
 """
 
 import json
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlparse
 
 import altair as alt
@@ -19,6 +21,13 @@ METRICS_PATH = "metrics.json"
 VIRTUAL_CAM_STATUS_PATH = "virtual_cam_status.json"
 WEBVIS_URL = "http://localhost:8000"
 LIVE_PIPELINE_CMD = [sys.executable, "pipelines/live.py"]
+
+# Absolute, unlike LIVE_PIPELINE_CMD: Tab 2's subprocess must be locatable regardless of the
+# Streamlit process's current working directory (e.g. under test, where control.json/
+# metrics.json isolation relies on monkeypatch.chdir()'ing elsewhere), whereas Tab 1's has
+# always assumed Streamlit itself is launched from the repo root.
+BATCH_PIPELINE_CMD = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pipelines", "batch.py")]
+BATCH_UPLOAD_TYPES = ["jpg", "jpeg", "png", "bmp", "webp"]
 
 DEFAULT_CONTROL = {
     "confidence_threshold": 0.5,
@@ -134,6 +143,49 @@ def stop_pipeline(process):
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
+
+
+def sanitized_upload_filename(original_name):
+    """Return a safe on-disk filename derived only from the uploaded file's extension.
+    Streamlit's own UploadedFile.name docs warn it is not sanitized (browser/user supplied) and
+    should not be written to disk directly — keep just the extension (needed for ImageIn's
+    image-file detection) and discard the rest.
+    """
+
+    _, ext = os.path.splitext(original_name)
+    return f"upload{ext.lower()}"
+
+
+def build_batch_args(input_dir, output_dir):
+    return list(BATCH_PIPELINE_CMD) + ["--input-dir", input_dir, "--output-dir", output_dir]
+
+
+def run_batch_pipeline(input_dir, output_dir):
+    """Blocking one-shot run of pipelines/batch.py — subprocess.run, not Popen, since Tab 2 is
+    one-shot and should block until done, unlike Tab 1's long-running pipeline process. Raises
+    subprocess.CalledProcessError on failure (caller decides how to surface it)."""
+
+    subprocess.run(build_batch_args(input_dir, output_dir), check=True)
+    return os.path.join(output_dir, "annotated.png")
+
+
+def process_uploaded_image(uploaded_file):
+    """Write the upload to a fresh temp input dir, run the batch pipeline, and return
+    (input_path, output_path). A fresh tempfile.mkdtemp() per call means successive uploads
+    never see a previous request's files."""
+
+    work_dir = tempfile.mkdtemp(prefix="rap_batch_")
+    input_dir = os.path.join(work_dir, "input")
+    output_dir = os.path.join(work_dir, "output")
+    os.makedirs(input_dir)
+    os.makedirs(output_dir)
+
+    input_path = os.path.join(input_dir, sanitized_upload_filename(uploaded_file.name))
+    with open(input_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    output_path = run_batch_pipeline(input_dir, output_dir)
+    return input_path, output_path
 
 
 def _state_key(field):
@@ -324,9 +376,39 @@ def render_stream(running):
         )
 
 
+def render_batch_tab():
+    st.subheader("Upload an image")
+    uploaded = st.file_uploader("Choose an image", type=BATCH_UPLOAD_TYPES, key="batch_uploader")
+
+    if uploaded is None:
+        return
+
+    # Gate the (expensive, YOLO-loading) subprocess run on the upload's identity, not just its
+    # presence: st_autorefresh reruns this whole script every 2s, and st.file_uploader keeps
+    # returning the same uploaded file across reruns until the user picks a different one — so
+    # without this check, every autorefresh tick would silently re-run detection from scratch.
+    if st.session_state.get("batch_file_id") != uploaded.file_id:
+        try:
+            with st.spinner("Running detection..."):
+                input_path, output_path = process_uploaded_image(uploaded)
+        except subprocess.CalledProcessError as e:
+            st.error(f"Batch pipeline failed: {e}")
+            st.session_state.pop("batch_file_id", None)
+            st.session_state.pop("batch_result", None)
+            return
+
+        st.session_state.batch_file_id = uploaded.file_id
+        st.session_state.batch_result = (input_path, output_path)
+
+    input_path, output_path = st.session_state.batch_result
+    col1, col2 = st.columns(2)
+    col1.image(input_path, caption="Input")
+    col2.image(output_path, caption="Annotated output")
+
+
 def main():
     st.set_page_config(page_title="OpenFilter RAP", layout="wide")
-    st.title("OpenFilter RAP — Live Pipeline")
+    st.title("OpenFilter RAP")
 
     if "pipeline_process" not in st.session_state:
         st.session_state.pipeline_process = None
@@ -341,9 +423,12 @@ def main():
 
     render_sidebar(running)
 
-    render_stream(running)
-
-    render_metrics()
+    live_tab, batch_tab = st.tabs(["Live", "Upload & batch"])
+    with live_tab:
+        render_stream(running)
+        render_metrics()
+    with batch_tab:
+        render_batch_tab()
 
 
 if __name__ == "__main__":
