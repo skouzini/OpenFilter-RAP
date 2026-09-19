@@ -2,11 +2,12 @@ import json
 import os
 
 import numpy as np
+from openfilter.filter_runtime.filter import Frame
 
 from filters.annotator import class_counts, draw_detections, visible_detections
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
-from filters.privacy_blur import pixelate_region
+from filters.privacy_blur import blur_frame, pixelate_region
 
 
 class FakeTensor(list):
@@ -120,6 +121,32 @@ def test_pixelate_region_returns_the_image():
     result = pixelate_region(image, [10, 10, 30, 30], block_size=10)
 
     assert result is image
+
+
+def test_blur_frame_pixelates_matching_detection_on_readonly_frame():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+    image.flags.writeable = False  # frames arriving from another filter over the wire are read-only
+    frame = Frame(image, {}, "BGR")
+    detections = [{"class": "person", "box": [10, 10, 30, 30], "score": 0.9}]
+
+    result = blur_frame(frame, detections, "person")
+
+    block = result.image[10:25, 10:25, 0]
+    assert (block == block[0, 0]).all()
+
+
+def test_blur_frame_leaves_non_matching_detections_unpixelated():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+    image.flags.writeable = False
+    frame = Frame(image, {}, "BGR")
+    detections = [{"class": "car", "box": [10, 10, 30, 30], "score": 0.9}]
+
+    result = blur_frame(frame, detections, "person")
+
+    block = result.image[10:25, 10:25, 0]
+    assert not (block == block[0, 0]).all()
 
 
 def test_visible_detections_excludes_blurred_class_when_enabled():

@@ -25,15 +25,26 @@ class PrivacyBlur(ControlMixin, Filter):
         blur_class = control.get("blur_class")
 
         if blur_enabled and blur_class:
-            image = frame.rw.image
-
-            for det in frame.data.get("detections", []):
-                if det["class"] == blur_class:
-                    pixelate_region(image, det["box"])
-
-            return {"main": frame.rw}
+            frame = blur_frame(frame, frame.data.get("detections", []), blur_class)
 
         return {"main": frame}
+
+
+def blur_frame(frame, detections, blur_class):
+    """Pixelate every detection matching blur_class directly on frame.image, returning the
+    frame to send downstream. `frame.rw` is fetched exactly once here and reused for both the
+    mutation and the return value — frames arriving over the wire are typically read-only, and
+    `.rw` allocates a NEW writable copy each time it's accessed on a read-only frame, so calling
+    it twice would pixelate one copy while returning a different, unmodified one.
+    """
+
+    frame = frame.rw
+
+    for det in detections:
+        if det["class"] == blur_class:
+            pixelate_region(frame.image, det["box"])
+
+    return frame
 
 
 def pixelate_region(image, box, block_size=DEFAULT_BLOCK_SIZE):
