@@ -174,6 +174,9 @@ def render_metrics():
         st.caption("No metrics yet — metrics.json isn't written until the PrivacyBlur + metrics milestone.")
 
 
+STREAM_HEIGHT = 500
+
+
 def render_stream(running):
     # Only mount the iframe once Webvis is actually reachable: if it's inserted while the
     # server refuses connections, the browser caches that connection-refused navigation on the
@@ -185,7 +188,20 @@ def render_stream(running):
     elif not webvis_ready():
         st.info("Pipeline starting — waiting for the video stream...")
     else:
-        st.iframe(WEBVIS_URL, height=500)
+        # Webvis serves the bare MJPEG stream with no HTML wrapper of its own, so a plain
+        # iframe(WEBVIS_URL) renders the <img> at the camera's native resolution — Chrome's
+        # auto-fit-to-window scaling only kicks in for a top-level tab, not a subframe, so a
+        # webcam frame larger than STREAM_HEIGHT gets clipped to its top-left corner instead of
+        # scaled down. Wrapping it in our own HTML with object-fit: contain fixes that — the
+        # wrapper div needs an explicit pixel height (not a %) or the img's height:100% won't
+        # resolve against anything, and it'll render at its natural aspect ratio instead of
+        # fitting the box, overflowing past STREAM_HEIGHT and getting clipped by the iframe.
+        st.iframe(
+            f'<div style="width:100%;height:{STREAM_HEIGHT}px;margin:0;background:#000;overflow:hidden;">'
+            f'<img src="{WEBVIS_URL}" style="width:100%;height:100%;object-fit:contain;display:block;">'
+            f"</div>",
+            height=STREAM_HEIGHT,
+        )
 
 
 def main():
