@@ -5,5 +5,6 @@
   "blur_class": "person",
   "blur_style": "pixelate",
   "blur_intensity": 15,
-  "show_metrics": true
+  "show_metrics": true,
+  "virtual_cam_enabled": false
 }

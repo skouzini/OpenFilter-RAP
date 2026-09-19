@@ -8,6 +8,7 @@ from filters.annotator import class_counts, draw_detections, group_confidences_b
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
 from filters.privacy_blur import blur_frame, blur_region, gaussian_blur_region, pixelate_region, solid_fill_region
+from filters.virtual_cam_out import should_start, should_stop
 
 
 class FakeTensor(list):
@@ -419,3 +420,35 @@ def test_get_control_keeps_last_known_value_when_file_disappears(tmp_path):
 
     assert first == {"confidence_threshold": 0.5}
     assert second == {"confidence_threshold": 0.5}
+
+
+def test_should_start_on_rising_edge():
+    assert should_start(enabled=True, was_enabled=False) is True
+
+
+def test_should_start_false_when_already_enabled():
+    assert should_start(enabled=True, was_enabled=True) is False
+
+
+def test_should_start_false_when_staying_disabled():
+    assert should_start(enabled=False, was_enabled=False) is False
+
+
+def test_should_start_false_on_falling_edge():
+    assert should_start(enabled=False, was_enabled=True) is False
+
+
+def test_should_stop_on_falling_edge():
+    assert should_stop(enabled=False, was_enabled=True) is True
+
+
+def test_should_stop_false_when_already_disabled():
+    assert should_stop(enabled=False, was_enabled=False) is False
+
+
+def test_should_stop_false_when_staying_enabled():
+    assert should_stop(enabled=True, was_enabled=True) is False
+
+
+def test_should_stop_false_on_rising_edge():
+    assert should_stop(enabled=True, was_enabled=False) is False

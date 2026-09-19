@@ -4,6 +4,7 @@ __pycache__/
 *.pt
 control.json
 metrics.json
+virtual_cam_status.json
 .DS_Store
 logs/
 *.egg-info/
