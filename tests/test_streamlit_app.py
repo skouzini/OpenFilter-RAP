@@ -5,7 +5,7 @@ import sys
 
 from streamlit.testing.v1 import AppTest
 
-from app.streamlit_app import DEFAULT_CONTROL, build_batch_args, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, sanitized_upload_filename, update_control, webvis_ready
+from app.streamlit_app import DEFAULT_CONTROL, batch_run_needed, build_batch_args, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, sanitized_upload_filename, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -265,6 +265,31 @@ def test_sanitized_upload_filename_lowercases_extension():
     assert sanitized_upload_filename("photo.JPG") == "upload.jpg"
 
 
+def test_batch_run_needed_true_when_state_empty():
+    assert batch_run_needed({}, "abc") is True
+
+
+def test_batch_run_needed_false_when_already_running_same_file():
+    """A previous, still-in-flight rerun already launched the subprocess for this exact file —
+    st_autorefresh can trigger a new script rerun every 2s regardless of whether that earlier
+    rerun's blocking subprocess.run() has returned yet (Python can't interrupt a thread stuck in
+    a blocking syscall), so a naive 'is it cached as done yet' check alone would relaunch a
+    redundant subprocess on every such tick. Confirmed to happen in practice, not hypothetical."""
+
+    state = {"batch_running_file_id": "abc"}
+    assert batch_run_needed(state, "abc") is False
+
+
+def test_batch_run_needed_false_when_already_done_same_file():
+    state = {"batch_file_id": "abc"}
+    assert batch_run_needed(state, "abc") is False
+
+
+def test_batch_run_needed_true_for_a_different_file_even_if_another_is_cached_or_running():
+    state = {"batch_file_id": "abc", "batch_running_file_id": "abc"}
+    assert batch_run_needed(state, "xyz") is True
+
+
 def test_build_batch_args_includes_input_and_output_dirs():
     args = build_batch_args("/tmp/in", "/tmp/out")
 
@@ -306,3 +331,26 @@ def test_batch_tab_runs_pipeline_and_shows_both_images(tmp_path, monkeypatch):
     uploader.set_value(("frame.png", encoded.tobytes(), "image/png")).run(timeout=120)
 
     assert len(at.image) >= 2
+
+
+def test_batch_tab_does_not_relaunch_for_a_run_already_in_flight(tmp_path, monkeypatch):
+    """Regression test for a real bug: st_autorefresh can trigger a new script rerun every 2s
+    while an earlier rerun's blocking subprocess.run() for this exact file is still in flight.
+    Simulates that overlap directly (pre-seed batch_running_file_id, matching the upload's own
+    file_id, before running) and asserts the rerun does NOT start a second real subprocess —
+    it must not populate batch_file_id/batch_result, since that would only happen after a batch
+    run actually completed.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    at = AppTest.from_file(APP_PATH).run()
+    uploader = at.file_uploader[0]
+    uploader.set_value(("frame.png", b"stand-in bytes, this run must never reach the subprocess", "image/png"))
+    file_id = uploader._files[0][0]  # AppTest assigns this synchronously in set_value(), pre-run
+
+    at.session_state["batch_running_file_id"] = file_id
+    at.run(timeout=30)
+
+    assert "batch_result" not in at.session_state
+    assert "batch_file_id" not in at.session_state
+    assert "Running detection..." in [i.value for i in at.info]

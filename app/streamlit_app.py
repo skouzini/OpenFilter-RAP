@@ -376,6 +376,22 @@ def render_stream(running):
         )
 
 
+def batch_run_needed(state, file_id):
+    """Whether file_id needs a fresh batch run: not already cached as done, and not already in
+    flight from an earlier, still-running rerun for this exact file.
+
+    The second check matters because subprocess.run() blocks synchronously, and Streamlit's
+    st_autorefresh can trigger a brand-new script rerun every 2s regardless of whether an
+    earlier rerun's blocking call has returned yet — Python can't interrupt a thread stuck in a
+    blocking syscall, so that earlier rerun keeps running in the background while a new one
+    starts. Without this check, every such tick would see batch_file_id still unset (the first
+    run hasn't finished to set it) and launch ANOTHER redundant subprocess, racing the first one
+    for the same ports. Confirmed to happen in practice, not hypothetical.
+    """
+
+    return state.get("batch_file_id") != file_id and state.get("batch_running_file_id") != file_id
+
+
 def render_batch_tab():
     st.subheader("Upload an image")
     uploaded = st.file_uploader("Choose an image", type=BATCH_UPLOAD_TYPES, key="batch_uploader")
@@ -383,22 +399,25 @@ def render_batch_tab():
     if uploaded is None:
         return
 
-    # Gate the (expensive, YOLO-loading) subprocess run on the upload's identity, not just its
-    # presence: st_autorefresh reruns this whole script every 2s, and st.file_uploader keeps
-    # returning the same uploaded file across reruns until the user picks a different one — so
-    # without this check, every autorefresh tick would silently re-run detection from scratch.
-    if st.session_state.get("batch_file_id") != uploaded.file_id:
+    if batch_run_needed(st.session_state, uploaded.file_id):
+        st.session_state.batch_running_file_id = uploaded.file_id
         try:
             with st.spinner("Running detection..."):
                 input_path, output_path = process_uploaded_image(uploaded)
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             st.error(f"Batch pipeline failed: {e}")
-            st.session_state.pop("batch_file_id", None)
-            st.session_state.pop("batch_result", None)
+            st.session_state.pop("batch_running_file_id", None)
             return
 
+        st.session_state.pop("batch_running_file_id", None)
         st.session_state.batch_file_id = uploaded.file_id
         st.session_state.batch_result = (input_path, output_path)
+
+    if st.session_state.get("batch_file_id") != uploaded.file_id:
+        # Still running (batch_run_needed was False because batch_running_file_id matched, not
+        # batch_file_id) — nothing cached yet to show for this file.
+        st.info("Running detection...")
+        return
 
     input_path, output_path = st.session_state.batch_result
     col1, col2 = st.columns(2)

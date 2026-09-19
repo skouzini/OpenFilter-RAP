@@ -1,14 +1,55 @@
 import os
 import shutil
+import socket
 import subprocess
 import sys
 
 import cv2
 import pytest
 
-from pipelines.batch import OUTPUT_FILENAME, finalize_output
+from pipelines.batch import OUTPUT_FILENAME, allocate_port_pair, finalize_output
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_allocate_port_pair_returns_a_port_whose_successor_is_also_free():
+    port = allocate_port_pair()
+
+    # both port and port+1 must be bindable right now — proves they were actually free, not
+    # just plausible-looking numbers.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", port))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", port + 1))
+
+
+def test_allocate_port_pair_avoids_a_port_already_in_use():
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("", 0))
+    blocked_port = blocker.getsockname()[1]
+    blocker.listen(1)
+
+    try:
+        port = allocate_port_pair()
+        assert port != blocked_port
+    finally:
+        blocker.close()
+
+
+def test_allocate_port_pair_sharing_an_exclude_set_never_collide_or_neighbor():
+    """Regression test: independently-checked pairs can still land on or next to each other,
+    since each call releases its probe sockets before the next call runs. Sharing one exclude
+    set across several allocations (as run_batch does for its four ports) must prevent that."""
+
+    used = set()
+    ports = [allocate_port_pair(exclude=used) for _ in range(8)]
+
+    occupied = set()
+    for port in ports:
+        assert port not in occupied
+        assert (port + 1) not in occupied
+        occupied.add(port)
+        occupied.add(port + 1)
 
 
 def test_finalize_output_renames_produced_file_to_fixed_name(tmp_path):
