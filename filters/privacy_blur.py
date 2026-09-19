@@ -19,6 +19,12 @@ DEFAULT_BLOCK_SIZE = 15
 DEFAULT_BLUR_STYLE = "pixelate"
 SOLID_FILL_COLOR = (0, 0, 0)  # BGR
 
+# cv2.GaussianBlur's auto-derived sigma (from kernel size, sigmaX=0) grows very slowly
+# (~0.15 px of blur per px of kernel size), so sweeping the intensity slider barely changed the
+# result. Driving sigma directly — scaled by this multiplier — gives a much more pronounced
+# range from barely-blurred to fully-flat across the same slider.
+GAUSSIAN_SIGMA_MULTIPLIER = 0.3
+
 
 class PrivacyBlur(ControlMixin, Filter):
     def process(self, frames):
@@ -70,7 +76,7 @@ def blur_region(image, box, style, intensity):
     """
 
     if style == "gaussian":
-        return gaussian_blur_region(image, box, kernel_size=intensity)
+        return gaussian_blur_region(image, box, intensity=intensity)
     if style == "solid":
         return solid_fill_region(image, box)
     return pixelate_region(image, box, block_size=intensity)
@@ -91,20 +97,20 @@ def pixelate_region(image, box, block_size=DEFAULT_BLOCK_SIZE):
     return image
 
 
-def gaussian_blur_region(image, box, kernel_size=DEFAULT_BLOCK_SIZE):
-    """Gaussian-blur the region of `image` bounded by `box`, mutating it in place. cv2 requires
-    an odd kernel size, so an even `kernel_size` is rounded up to the next odd number.
+def gaussian_blur_region(image, box, intensity=DEFAULT_BLOCK_SIZE):
+    """Gaussian-blur the region of `image` bounded by `box`, mutating it in place. `intensity`
+    maps directly to the blur's sigma (via GAUSSIAN_SIGMA_MULTIPLIER); kernel size is left for
+    cv2 to auto-derive from sigma (ksize=(0, 0)) so it's always sized correctly for the blur.
     """
 
     x1, y1, x2, y2 = _region_bounds(image, box)
     if x2 <= x1 or y2 <= y1:
         return image
 
-    kernel_size = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
-    kernel_size = max(kernel_size, 1)
+    sigma = intensity * GAUSSIAN_SIGMA_MULTIPLIER
 
     region = image[y1:y2, x1:x2]
-    region[:] = cv2.GaussianBlur(region, (kernel_size, kernel_size), 0)
+    region[:] = cv2.GaussianBlur(region, (0, 0), sigma)
 
     return image
 

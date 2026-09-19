@@ -162,7 +162,7 @@ def test_gaussian_blur_region_smooths_an_impulse():
     image = np.zeros((40, 40, 3), dtype=np.uint8)
     image[19, 19] = (255, 255, 255)
 
-    gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=9)
+    gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
 
     assert image[19, 19, 0] < 255
     assert image[19, 20, 0] > 0
@@ -172,25 +172,35 @@ def test_gaussian_blur_region_leaves_pixels_outside_box_unchanged():
     image = np.zeros((40, 40, 3), dtype=np.uint8)
     image[35, 35] = (7, 8, 9)
 
-    gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=9)
+    gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
 
     assert tuple(image[35, 35]) == (7, 8, 9)
 
 
-def test_gaussian_blur_region_accepts_even_kernel_size():
-    image = np.zeros((40, 40, 3), dtype=np.uint8)
-    image[19, 19] = (255, 255, 255)
+def test_gaussian_blur_region_high_intensity_blurs_much_more_than_low_intensity():
+    def make_image():
+        image = np.zeros((60, 60, 3), dtype=np.uint8)
+        image[20:40, 20:40] = 255
+        return image
 
-    result = gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=8)
+    box = [5, 5, 55, 55]
+    low, high = make_image(), make_image()
 
-    assert result is image
-    assert image[19, 19, 0] < 255
+    gaussian_blur_region(low, box, intensity=3)
+    gaussian_blur_region(high, box, intensity=41)
+
+    low_variance = low[5:55, 5:55].astype(float).var()
+    high_variance = high[5:55, 5:55].astype(float).var()
+
+    # the slider should sweep from "barely blurred" to "nearly flat" across its range,
+    # not just shave a little off the top
+    assert high_variance < low_variance * 0.15
 
 
 def test_gaussian_blur_region_returns_the_image():
     image = np.zeros((40, 40, 3), dtype=np.uint8)
 
-    result = gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=9)
+    result = gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
 
     assert result is image
 
