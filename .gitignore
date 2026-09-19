@@ -5,3 +5,5 @@ __pycache__/
 control.json
 .DS_Store
 logs/
+*.egg-info/
+.pytest_cache/
