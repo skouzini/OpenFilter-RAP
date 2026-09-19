@@ -1,0 +1,42 @@
+"""Stage 1: framework smoke test. VideoIn -> Webvis, no custom filters yet.
+
+Source defaults to the looped sample video so this runs without a webcam;
+pass --webcam to use a live camera instead once camera access is confirmed.
+Use --webcam-index if the default device (0) isn't the one you want — on a
+machine with multiple cameras (e.g. a smart webcam plus the built-in one),
+index 0 isn't guaranteed to be the built-in camera.
+"""
+
+import argparse
+
+from openfilter.filter_runtime.filter import Filter
+from openfilter.filter_runtime.filters.video_in import VideoIn
+from openfilter.filter_runtime.filters.webvis import Webvis
+
+SAMPLE_VIDEO = "assets/sample_video.mp4"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--webcam", action="store_true", help="use a live camera instead of the sample video")
+    parser.add_argument("--webcam-index", type=int, default=0, help="camera device index (default 0)")
+    args = parser.parse_args()
+
+    source = f"webcam://{args.webcam_index}" if args.webcam else f"file://{SAMPLE_VIDEO}!loop"
+
+    Filter.run_multi([
+        (VideoIn, dict(
+            id="video_in",
+            sources=source,
+            outputs="tcp://*:5550",
+        )),
+        (Webvis, dict(
+            id="webvis",
+            sources="tcp://127.0.0.1:5550",
+            outputs="http://0.0.0.0:8000",
+        )),
+    ])
+
+
+if __name__ == "__main__":
+    main()
