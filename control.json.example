@@ -3,5 +3,7 @@
   "active_classes": ["person", "car", "laptop"],
   "blur_enabled": false,
   "blur_class": "person",
+  "blur_style": "pixelate",
+  "blur_intensity": 15,
   "show_metrics": true
 }

@@ -125,6 +125,28 @@ def test_metrics_section_hidden_when_show_metrics_toggled_off(tmp_path, monkeypa
     assert "Detection confidence (last 30s)" not in [s.value for s in at.subheader]
 
 
+def test_changing_blur_style_persists_correctly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    style_select = [s for s in at.sidebar.selectbox if s.label == "Blur style"][0]
+    style_select.set_value("gaussian").run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_style"] == "gaussian"
+
+
+def test_changing_blur_intensity_persists_correctly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    intensity_slider = [s for s in at.sidebar.slider if s.label == "Blur intensity"][0]
+    intensity_slider.set_value(25).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_intensity"] == 25
+
+
 def test_changing_one_control_does_not_reset_another(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 

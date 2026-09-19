@@ -24,8 +24,12 @@ DEFAULT_CONTROL = {
     "active_classes": ["person", "car", "laptop"],
     "blur_enabled": False,
     "blur_class": "person",
+    "blur_style": "pixelate",
+    "blur_intensity": 15,
     "show_metrics": True,
 }
+
+BLUR_STYLES = ["pixelate", "gaussian", "solid"]
 
 # COCO classes YOLOv8n (used by filters/detector.py) was pretrained on.
 COCO_CLASSES = [
@@ -139,6 +143,8 @@ def init_control_state():
     current = merge_control(DEFAULT_CONTROL, read_control())
     if current["blur_class"] not in COCO_CLASSES:
         current["blur_class"] = DEFAULT_CONTROL["blur_class"]
+    if current["blur_style"] not in BLUR_STYLES:
+        current["blur_style"] = DEFAULT_CONTROL["blur_style"]
 
     for field, value in current.items():
         st.session_state[_state_key(field)] = value
@@ -192,6 +198,19 @@ def render_sidebar(running):
         "Blur class", COCO_CLASSES,
         key=_state_key("blur_class"),
         on_change=_write_control_field, args=("blur_class",),
+    )
+
+    st.sidebar.selectbox(
+        "Blur style", BLUR_STYLES,
+        key=_state_key("blur_style"),
+        on_change=_write_control_field, args=("blur_style",),
+    )
+
+    st.sidebar.slider(
+        "Blur intensity", 3, 41, step=1,
+        key=_state_key("blur_intensity"),
+        on_change=_write_control_field, args=("blur_intensity",),
+        help="Block size (pixelate) or blur strength (gaussian). Has no effect on solid fill.",
     )
 
     st.sidebar.toggle(

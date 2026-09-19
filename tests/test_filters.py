@@ -7,7 +7,7 @@ from openfilter.filter_runtime.filter import Frame
 from filters.annotator import class_counts, draw_detections, group_confidences_by_class, prune_old_samples, visible_detections
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
-from filters.privacy_blur import blur_frame, pixelate_region
+from filters.privacy_blur import blur_frame, blur_region, gaussian_blur_region, pixelate_region, solid_fill_region
 
 
 class FakeTensor(list):
@@ -123,6 +123,116 @@ def test_pixelate_region_returns_the_image():
     assert result is image
 
 
+def test_solid_fill_region_fills_box_with_color():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+
+    solid_fill_region(image, [10, 10, 30, 30], color=(0, 0, 0))
+
+    assert (image[10:30, 10:30] == 0).all()
+
+
+def test_solid_fill_region_defaults_to_black():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+
+    solid_fill_region(image, [10, 10, 30, 30])
+
+    assert (image[10:30, 10:30] == 0).all()
+
+
+def test_solid_fill_region_leaves_pixels_outside_box_unchanged():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[35, 35] = (7, 8, 9)
+
+    solid_fill_region(image, [10, 10, 30, 30])
+
+    assert tuple(image[35, 35]) == (7, 8, 9)
+
+
+def test_solid_fill_region_returns_the_image():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    result = solid_fill_region(image, [10, 10, 30, 30])
+
+    assert result is image
+
+
+def test_gaussian_blur_region_smooths_an_impulse():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[19, 19] = (255, 255, 255)
+
+    gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=9)
+
+    assert image[19, 19, 0] < 255
+    assert image[19, 20, 0] > 0
+
+
+def test_gaussian_blur_region_leaves_pixels_outside_box_unchanged():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[35, 35] = (7, 8, 9)
+
+    gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=9)
+
+    assert tuple(image[35, 35]) == (7, 8, 9)
+
+
+def test_gaussian_blur_region_accepts_even_kernel_size():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[19, 19] = (255, 255, 255)
+
+    result = gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=8)
+
+    assert result is image
+    assert image[19, 19, 0] < 255
+
+
+def test_gaussian_blur_region_returns_the_image():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    result = gaussian_blur_region(image, [10, 10, 30, 30], kernel_size=9)
+
+    assert result is image
+
+
+def test_blur_region_dispatches_to_pixelate():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+
+    blur_region(image, [10, 10, 30, 30], "pixelate", 10)
+
+    block = image[10:20, 10:20, 0]
+    assert (block == block[0, 0]).all()
+
+
+def test_blur_region_dispatches_to_gaussian():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[19, 19] = (255, 255, 255)
+
+    blur_region(image, [10, 10, 30, 30], "gaussian", 9)
+
+    assert image[19, 19, 0] < 255
+
+
+def test_blur_region_dispatches_to_solid():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+
+    blur_region(image, [10, 10, 30, 30], "solid", 15)
+
+    assert (image[10:30, 10:30] == 0).all()
+
+
+def test_blur_region_falls_back_to_pixelate_for_unknown_style():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
+
+    blur_region(image, [10, 10, 30, 30], "not-a-real-style", 10)
+
+    block = image[10:20, 10:20, 0]
+    assert (block == block[0, 0]).all()
+
+
 def test_blur_frame_pixelates_matching_detection_on_readonly_frame():
     image = np.zeros((40, 40, 3), dtype=np.uint8)
     image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
@@ -134,6 +244,18 @@ def test_blur_frame_pixelates_matching_detection_on_readonly_frame():
 
     block = result.image[10:25, 10:25, 0]
     assert (block == block[0, 0]).all()
+
+
+def test_blur_frame_honors_explicit_style_and_intensity():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:30, 10:30] = (7, 8, 9)
+    image.flags.writeable = False
+    frame = Frame(image, {}, "BGR")
+    detections = [{"class": "person", "box": [10, 10, 30, 30], "score": 0.9}]
+
+    result = blur_frame(frame, detections, "person", style="solid", intensity=15)
+
+    assert (result.image[10:30, 10:30] == 0).all()
 
 
 def test_blur_frame_leaves_non_matching_detections_unpixelated():
