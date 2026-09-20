@@ -5,7 +5,8 @@ import sys
 
 from streamlit.testing.v1 import AppTest
 
-from app.streamlit_app import DEFAULT_CONTROL, batch_run_needed, build_batch_args, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, sanitized_upload_filename, update_control, webvis_ready
+import app.streamlit_app as streamlit_app_module
+from app.streamlit_app import DEFAULT_CONTROL, build_batch_args, confidence_rows, expected_batch_error_path, expected_batch_output_path, is_running, merge_control, prepare_batch_work_dir, read_control, read_metrics, read_virtual_cam_status, run_batch_pipeline, sanitized_upload_filename, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -265,29 +266,67 @@ def test_sanitized_upload_filename_lowercases_extension():
     assert sanitized_upload_filename("photo.JPG") == "upload.jpg"
 
 
-def test_batch_run_needed_true_when_state_empty():
-    assert batch_run_needed({}, "abc") is True
+def test_expected_batch_output_path_joins_dir_and_fixed_filename():
+    assert expected_batch_output_path("/tmp/out") == os.path.join("/tmp/out", "annotated.png")
 
 
-def test_batch_run_needed_false_when_already_running_same_file():
-    """A previous, still-in-flight rerun already launched the subprocess for this exact file —
-    st_autorefresh can trigger a new script rerun every 2s regardless of whether that earlier
-    rerun's blocking subprocess.run() has returned yet (Python can't interrupt a thread stuck in
-    a blocking syscall), so a naive 'is it cached as done yet' check alone would relaunch a
-    redundant subprocess on every such tick. Confirmed to happen in practice, not hypothetical."""
-
-    state = {"batch_running_file_id": "abc"}
-    assert batch_run_needed(state, "abc") is False
+def test_expected_batch_error_path_joins_dir_and_fixed_filename():
+    assert expected_batch_error_path("/tmp/out") == os.path.join("/tmp/out", "batch_error.txt")
 
 
-def test_batch_run_needed_false_when_already_done_same_file():
-    state = {"batch_file_id": "abc"}
-    assert batch_run_needed(state, "abc") is False
+class FakeUploadedFile:
+    """Stands in for streamlit's UploadedFile (a BytesIO subclass with .name/.getbuffer()) —
+    just enough surface for prepare_batch_work_dir, without needing a real upload or AppTest."""
+
+    def __init__(self, name, data):
+        self.name = name
+        self._data = data
+
+    def getbuffer(self):
+        return self._data
 
 
-def test_batch_run_needed_true_for_a_different_file_even_if_another_is_cached_or_running():
-    state = {"batch_file_id": "abc", "batch_running_file_id": "abc"}
-    assert batch_run_needed(state, "xyz") is True
+def test_prepare_batch_work_dir_writes_upload_bytes_to_a_fresh_dir():
+    uploaded = FakeUploadedFile("photo.PNG", b"fake-image-bytes")
+
+    input_path, output_dir = prepare_batch_work_dir(uploaded)
+
+    assert os.path.basename(input_path) == "upload.png"
+    with open(input_path, "rb") as f:
+        assert f.read() == b"fake-image-bytes"
+    assert os.path.isdir(output_dir)
+    assert os.listdir(output_dir) == []
+
+
+def test_prepare_batch_work_dir_successive_calls_use_separate_dirs():
+    input_path1, output_dir1 = prepare_batch_work_dir(FakeUploadedFile("a.png", b"one"))
+    input_path2, output_dir2 = prepare_batch_work_dir(FakeUploadedFile("a.png", b"two"))
+
+    assert input_path1 != input_path2
+    assert output_dir1 != output_dir2
+    with open(input_path1, "rb") as f:
+        assert f.read() == b"one"
+    with open(input_path2, "rb") as f:
+        assert f.read() == b"two"
+
+
+def test_run_batch_pipeline_writes_error_marker_on_failure(tmp_path, monkeypatch):
+    """A real subprocess.run() failure path, no mocks — but standing in a trivial always-fails
+    script for the real (YOLO-loading, multi-second) pipeline, so this stays fast and
+    deterministic while still exercising the actual error-marker-writing code."""
+
+    failing_script = tmp_path / "failing_batch.py"
+    failing_script.write_text("import sys\nsys.exit(1)\n")
+    monkeypatch.setattr(streamlit_app_module, "BATCH_PIPELINE_CMD", [sys.executable, str(failing_script)])
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    run_batch_pipeline(str(input_dir), str(output_dir))
+
+    assert os.path.exists(expected_batch_error_path(str(output_dir)))
 
 
 def test_build_batch_args_includes_input_and_output_dirs():
@@ -336,10 +375,10 @@ def test_batch_tab_runs_pipeline_and_shows_both_images(tmp_path, monkeypatch):
 def test_batch_tab_does_not_relaunch_for_a_run_already_in_flight(tmp_path, monkeypatch):
     """Regression test for a real bug: st_autorefresh can trigger a new script rerun every 2s
     while an earlier rerun's blocking subprocess.run() for this exact file is still in flight.
-    Simulates that overlap directly (pre-seed batch_running_file_id, matching the upload's own
-    file_id, before running) and asserts the rerun does NOT start a second real subprocess —
-    it must not populate batch_file_id/batch_result, since that would only happen after a batch
-    run actually completed.
+    Simulates that overlap directly — pre-seed the session_state an earlier rerun would already
+    have written (work dir prepared, marked running) before the file even finished uploading —
+    and asserts the rerun does NOT start a second real subprocess: the output file must still not
+    exist, and the tab must show its "still running" state rather than a rendered result.
     """
     monkeypatch.chdir(tmp_path)
 
@@ -348,9 +387,18 @@ def test_batch_tab_does_not_relaunch_for_a_run_already_in_flight(tmp_path, monke
     uploader.set_value(("frame.png", b"stand-in bytes, this run must never reach the subprocess", "image/png"))
     file_id = uploader._files[0][0]  # AppTest assigns this synchronously in set_value(), pre-run
 
+    work_dir = tmp_path / "fake_work_dir"
+    output_dir = work_dir / "output"
+    output_dir.mkdir(parents=True)
+    input_path = work_dir / "input" / "upload.png"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_bytes(b"fake")
+
+    at.session_state["batch_upload_file_id"] = file_id
+    at.session_state["batch_input_path"] = str(input_path)
+    at.session_state["batch_output_dir"] = str(output_dir)
     at.session_state["batch_running_file_id"] = file_id
     at.run(timeout=30)
 
-    assert "batch_result" not in at.session_state
-    assert "batch_file_id" not in at.session_state
+    assert not os.path.exists(expected_batch_output_path(str(output_dir)))
     assert "Running detection..." in [i.value for i in at.info]

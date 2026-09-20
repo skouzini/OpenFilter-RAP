@@ -160,19 +160,28 @@ def build_batch_args(input_dir, output_dir):
     return list(BATCH_PIPELINE_CMD) + ["--input-dir", input_dir, "--output-dir", output_dir]
 
 
-def run_batch_pipeline(input_dir, output_dir):
-    """Blocking one-shot run of pipelines/batch.py — subprocess.run, not Popen, since Tab 2 is
-    one-shot and should block until done, unlike Tab 1's long-running pipeline process. Raises
-    subprocess.CalledProcessError on failure (caller decides how to surface it)."""
+# Must match pipelines/batch.py's OUTPUT_FILENAME. Duplicated as a plain string rather than
+# imported: pipelines/batch.py imports openfilter/ultralytics at module level (to define its
+# filter chain), and importing it from this process just to read one constant would eagerly pull
+# in that entire heavy stack (including torch) on every Streamlit rerun.
+BATCH_OUTPUT_FILENAME = "annotated.png"
+BATCH_ERROR_FILENAME = "batch_error.txt"
 
-    subprocess.run(build_batch_args(input_dir, output_dir), check=True)
-    return os.path.join(output_dir, "annotated.png")
+
+def expected_batch_output_path(output_dir):
+    return os.path.join(output_dir, BATCH_OUTPUT_FILENAME)
 
 
-def process_uploaded_image(uploaded_file):
-    """Write the upload to a fresh temp input dir, run the batch pipeline, and return
-    (input_path, output_path). A fresh tempfile.mkdtemp() per call means successive uploads
-    never see a previous request's files."""
+def expected_batch_error_path(output_dir):
+    return os.path.join(output_dir, BATCH_ERROR_FILENAME)
+
+
+def prepare_batch_work_dir(uploaded_file):
+    """Create a fresh work dir for this upload and write its bytes to disk. Pure I/O, no
+    subprocess — safe to call unconditionally on first sight of a new upload, before deciding
+    whether a batch run is actually needed yet. Returns (input_path, output_dir). A fresh
+    tempfile.mkdtemp() per call means successive uploads never see a previous request's files.
+    """
 
     work_dir = tempfile.mkdtemp(prefix="rap_batch_")
     input_dir = os.path.join(work_dir, "input")
@@ -184,8 +193,35 @@ def process_uploaded_image(uploaded_file):
     with open(input_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    output_path = run_batch_pipeline(input_dir, output_dir)
-    return input_path, output_path
+    return input_path, output_dir
+
+
+def run_batch_pipeline(input_dir, output_dir):
+    """Blocking one-shot run of pipelines/batch.py — subprocess.run, not Popen, since Tab 2 is
+    one-shot and should block until done, unlike Tab 1's long-running pipeline process.
+
+    Deliberately does NOT return a value, raise on failure, or rely on any st.session_state write
+    made by the caller once this returns to record the outcome. Streamlit's fastReruns
+    concurrency model can terminate a superseded script thread between two plain Python
+    statements with no Streamlit API call between them at all — not only at the documented yield
+    points (any st.* call that enqueues a ForwardMsg). Confirmed in practice: a real run's
+    subprocess.run() call completed successfully, but the SAME script thread never reached its
+    very next line (a bare st.session_state assignment) to record that.
+
+    So both outcomes are instead written straight to disk, from right here, before this function
+    returns control to a script thread that might by then already be stale: success is recorded
+    implicitly by the output image existing (see expected_batch_output_path — pipelines/batch.py
+    itself, a separate OS process, writes that file, so it isn't even reachable by this concern),
+    and failure is recorded explicitly in a small error marker file (expected_batch_error_path)
+    written by this function itself, synchronously, before subprocess.run() returns control to
+    anything Streamlit could later cancel.
+    """
+
+    try:
+        subprocess.run(build_batch_args(input_dir, output_dir), check=True)
+    except subprocess.CalledProcessError as e:
+        with open(expected_batch_error_path(output_dir), "w") as f:
+            f.write(str(e))
 
 
 def _state_key(field):
@@ -376,22 +412,6 @@ def render_stream(running):
         )
 
 
-def batch_run_needed(state, file_id):
-    """Whether file_id needs a fresh batch run: not already cached as done, and not already in
-    flight from an earlier, still-running rerun for this exact file.
-
-    The second check matters because subprocess.run() blocks synchronously, and Streamlit's
-    st_autorefresh can trigger a brand-new script rerun every 2s regardless of whether an
-    earlier rerun's blocking call has returned yet — Python can't interrupt a thread stuck in a
-    blocking syscall, so that earlier rerun keeps running in the background while a new one
-    starts. Without this check, every such tick would see batch_file_id still unset (the first
-    run hasn't finished to set it) and launch ANOTHER redundant subprocess, racing the first one
-    for the same ports. Confirmed to happen in practice, not hypothetical.
-    """
-
-    return state.get("batch_file_id") != file_id and state.get("batch_running_file_id") != file_id
-
-
 def render_batch_tab():
     st.subheader("Upload an image")
     uploaded = st.file_uploader("Choose an image", type=BATCH_UPLOAD_TYPES, key="batch_uploader")
@@ -399,42 +419,37 @@ def render_batch_tab():
     if uploaded is None:
         return
 
-    if batch_run_needed(st.session_state, uploaded.file_id):
-        st.session_state.batch_running_file_id = uploaded.file_id
-        error = None
+    if st.session_state.get("batch_upload_file_id") != uploaded.file_id:
+        # A genuinely new upload (or the first time we've seen this session's file at all): set
+        # up its work dir and write it to disk right away. Pure I/O, no subprocess, so there's
+        # nothing here that a superseded script run's cancellation could interrupt partway.
+        input_path, output_dir = prepare_batch_work_dir(uploaded)
+        st.session_state.batch_upload_file_id = uploaded.file_id
+        st.session_state.batch_input_path = input_path
+        st.session_state.batch_output_dir = output_dir
+        st.session_state.pop("batch_running_file_id", None)
 
-        # Record the outcome INSIDE the spinner's own `with` block, before it exits — not after.
-        # st.spinner.__exit__() itself makes a Streamlit rendering call (to remove the spinner),
-        # and a script run that's been superseded by a newer rerun (st_autorefresh firing again
-        # while this run was still blocked in subprocess.run()) can be cut off at exactly that
-        # kind of call. If we set batch_file_id/batch_result and cleared the running-lock only
-        # AFTER the `with` block, the detection could finish successfully and then this whole run
-        # gets stopped right at the spinner's exit, before those lines ever ran — leaving the
-        # lock permanently set and the tab stuck showing "Running detection..." forever, despite
-        # the batch already having produced a real result. Confirmed as a real failure mode, not
-        # hypothetical.
-        with st.spinner("Running detection..."):
-            try:
-                input_path, output_path = process_uploaded_image(uploaded)
-            except Exception as e:
-                error = str(e)
-            else:
-                st.session_state.batch_file_id = uploaded.file_id
-                st.session_state.batch_result = (input_path, output_path)
-            finally:
-                st.session_state.pop("batch_running_file_id", None)
+    input_path = st.session_state.batch_input_path
+    output_dir = st.session_state.batch_output_dir
+    output_path = expected_batch_output_path(output_dir)
 
-        if error is not None:
-            st.error(f"Batch pipeline failed: {error}")
+    if not os.path.exists(output_path):
+        if st.session_state.get("batch_running_file_id") != uploaded.file_id:
+            st.session_state.batch_running_file_id = uploaded.file_id
+            with st.spinner("Running detection..."):
+                run_batch_pipeline(os.path.dirname(input_path), output_dir)
+
+        if os.path.exists(output_path):
+            pass  # fall through to render below
+        else:
+            error_path = expected_batch_error_path(output_dir)
+            if os.path.exists(error_path):
+                with open(error_path) as f:
+                    st.error(f"Batch pipeline failed: {f.read()}")
+                return
+            st.info("Running detection...")
             return
 
-    if st.session_state.get("batch_file_id") != uploaded.file_id:
-        # Still running (batch_run_needed was False because batch_running_file_id matched, not
-        # batch_file_id) — nothing cached yet to show for this file.
-        st.info("Running detection...")
-        return
-
-    input_path, output_path = st.session_state.batch_result
     col1, col2 = st.columns(2)
     col1.image(input_path, caption="Input")
     col2.image(output_path, caption="Annotated output")
