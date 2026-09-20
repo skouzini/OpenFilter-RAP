@@ -19,7 +19,11 @@ sidebar currently has written, for free, with no extra wiring. Annotator also wr
 metrics.json unconditionally, same file the live pipeline writes to; a batch run briefly
 overwrites it with this single image's counts, but the live pipeline (looping video, ~30fps)
 overwrites it right back on its very next frame, so this is a self-correcting one-frame race,
-not real corruption — not worth a separate metrics path for a stretch-goal batch tab.
+not real corruption — not worth a separate metrics path for a stretch-goal batch tab. Confirmed
+under real concurrent use (both Tab 1's live pipeline and a Tab 2 batch run genuinely running at
+once, not just reasoned about): metrics.json stayed valid JSON throughout, the live stream never
+stalled or errored, and the batch run completed normally with no port collisions — see
+tests/test_batch_pipeline.py::test_batch_pipeline_succeeds_while_live_pipeline_is_running.
 
 ImageOut's own output filename (strftime + %d + topic/frame-id suffixing — see
 openfilter.filter_runtime.filters.image_out.ImageWriter) is not the literal path passed as
