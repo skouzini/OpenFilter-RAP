@@ -1,10 +1,12 @@
 import json
 import os
 import socket
+import sys
 
 from streamlit.testing.v1 import AppTest
 
-from app.streamlit_app import DEFAULT_CONTROL, confidence_rows, is_running, merge_control, read_control, read_metrics, read_virtual_cam_status, update_control, webvis_ready
+import app.streamlit_app as streamlit_app_module
+from app.streamlit_app import DEFAULT_CONTROL, build_batch_args, confidence_rows, expected_batch_error_path, expected_batch_output_path, is_running, merge_control, prepare_batch_work_dir, read_control, read_metrics, read_virtual_cam_status, run_batch_pipeline, sanitized_upload_filename, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -256,6 +258,86 @@ def test_webvis_ready_true_when_something_is_listening():
         server.close()
 
 
+def test_sanitized_upload_filename_keeps_extension_discards_rest():
+    assert sanitized_upload_filename("../../etc/passwd.png") == "upload.png"
+
+
+def test_sanitized_upload_filename_lowercases_extension():
+    assert sanitized_upload_filename("photo.JPG") == "upload.jpg"
+
+
+def test_expected_batch_output_path_joins_dir_and_fixed_filename():
+    assert expected_batch_output_path("/tmp/out") == os.path.join("/tmp/out", "annotated.png")
+
+
+def test_expected_batch_error_path_joins_dir_and_fixed_filename():
+    assert expected_batch_error_path("/tmp/out") == os.path.join("/tmp/out", "batch_error.txt")
+
+
+class FakeUploadedFile:
+    """Stands in for streamlit's UploadedFile (a BytesIO subclass with .name/.getbuffer()) —
+    just enough surface for prepare_batch_work_dir, without needing a real upload or AppTest."""
+
+    def __init__(self, name, data):
+        self.name = name
+        self._data = data
+
+    def getbuffer(self):
+        return self._data
+
+
+def test_prepare_batch_work_dir_writes_upload_bytes_to_a_fresh_dir():
+    uploaded = FakeUploadedFile("photo.PNG", b"fake-image-bytes")
+
+    input_path, output_dir = prepare_batch_work_dir(uploaded)
+
+    assert os.path.basename(input_path) == "upload.png"
+    with open(input_path, "rb") as f:
+        assert f.read() == b"fake-image-bytes"
+    assert os.path.isdir(output_dir)
+    assert os.listdir(output_dir) == []
+
+
+def test_prepare_batch_work_dir_successive_calls_use_separate_dirs():
+    input_path1, output_dir1 = prepare_batch_work_dir(FakeUploadedFile("a.png", b"one"))
+    input_path2, output_dir2 = prepare_batch_work_dir(FakeUploadedFile("a.png", b"two"))
+
+    assert input_path1 != input_path2
+    assert output_dir1 != output_dir2
+    with open(input_path1, "rb") as f:
+        assert f.read() == b"one"
+    with open(input_path2, "rb") as f:
+        assert f.read() == b"two"
+
+
+def test_run_batch_pipeline_writes_error_marker_on_failure(tmp_path, monkeypatch):
+    """A real subprocess.run() failure path, no mocks — but standing in a trivial always-fails
+    script for the real (YOLO-loading, multi-second) pipeline, so this stays fast and
+    deterministic while still exercising the actual error-marker-writing code."""
+
+    failing_script = tmp_path / "failing_batch.py"
+    failing_script.write_text("import sys\nsys.exit(1)\n")
+    monkeypatch.setattr(streamlit_app_module, "BATCH_PIPELINE_CMD", [sys.executable, str(failing_script)])
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    run_batch_pipeline(str(input_dir), str(output_dir))
+
+    assert os.path.exists(expected_batch_error_path(str(output_dir)))
+
+
+def test_build_batch_args_includes_input_and_output_dirs():
+    args = build_batch_args("/tmp/in", "/tmp/out")
+
+    assert args[-4:] == ["--input-dir", "/tmp/in", "--output-dir", "/tmp/out"]
+    assert args[0] == sys.executable
+    assert args[1].endswith(os.path.join("pipelines", "batch.py"))
+    assert os.path.isabs(args[1])
+
+
 def test_webvis_ready_false_when_nothing_is_listening():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("localhost", 0))
@@ -263,3 +345,60 @@ def test_webvis_ready_false_when_nothing_is_listening():
     server.close()  # bound and released, so the port is free but nothing is listening on it
 
     assert webvis_ready(url=f"http://localhost:{port}") is False
+
+
+def test_batch_tab_runs_pipeline_and_shows_both_images(tmp_path, monkeypatch):
+    """Real, no-mock: uploads an actual image through AppTest's file_uploader simulation, lets
+    it invoke the real pipelines/batch.py subprocess, and asserts both images render. Slow
+    (loads YOLO) — this is intentionally the one Tab-2 test that pays that cost; everything else
+    exercises the pure argument-building/naming helpers instead.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    import cv2
+
+    repo_root = os.path.dirname(os.path.dirname(APP_PATH))
+    cap = cv2.VideoCapture(os.path.join(repo_root, "assets", "sample_video.mp4"))
+    ok, frame = cap.read()
+    cap.release()
+    assert ok
+    ok, encoded = cv2.imencode(".png", frame)
+    assert ok
+
+    at = AppTest.from_file(APP_PATH).run()
+    uploader = at.file_uploader[0]
+    uploader.set_value(("frame.png", encoded.tobytes(), "image/png")).run(timeout=120)
+
+    assert len(at.image) >= 2
+
+
+def test_batch_tab_does_not_relaunch_for_a_run_already_in_flight(tmp_path, monkeypatch):
+    """Regression test for a real bug: st_autorefresh can trigger a new script rerun every 2s
+    while an earlier rerun's blocking subprocess.run() for this exact file is still in flight.
+    Simulates that overlap directly — pre-seed the session_state an earlier rerun would already
+    have written (work dir prepared, marked running) before the file even finished uploading —
+    and asserts the rerun does NOT start a second real subprocess: the output file must still not
+    exist, and the tab must show its "still running" state rather than a rendered result.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    at = AppTest.from_file(APP_PATH).run()
+    uploader = at.file_uploader[0]
+    uploader.set_value(("frame.png", b"stand-in bytes, this run must never reach the subprocess", "image/png"))
+    file_id = uploader._files[0][0]  # AppTest assigns this synchronously in set_value(), pre-run
+
+    work_dir = tmp_path / "fake_work_dir"
+    output_dir = work_dir / "output"
+    output_dir.mkdir(parents=True)
+    input_path = work_dir / "input" / "upload.png"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_bytes(b"fake")
+
+    at.session_state["batch_upload_file_id"] = file_id
+    at.session_state["batch_input_path"] = str(input_path)
+    at.session_state["batch_output_dir"] = str(output_dir)
+    at.session_state["batch_running_file_id"] = file_id
+    at.run(timeout=30)
+
+    assert not os.path.exists(expected_batch_output_path(str(output_dir)))
+    assert "Running detection..." in [i.value for i in at.info]
