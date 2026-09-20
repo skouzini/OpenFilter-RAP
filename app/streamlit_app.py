@@ -29,18 +29,35 @@ LIVE_PIPELINE_CMD = [sys.executable, "pipelines/live.py"]
 BATCH_PIPELINE_CMD = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pipelines", "batch.py")]
 BATCH_UPLOAD_TYPES = ["jpg", "jpeg", "png", "bmp", "webp"]
 
+DEFAULT_BLUR_PRESET = "Medium"
+
+# Ordered light -> maximum. "Maximum" is a full blackout (solid fill) rather than a more
+# extreme pixelation, since the point at the top end is to guarantee nothing leaks through.
+BLUR_PRESETS = {
+    "Light": {"blur_style": "pixelate", "blur_intensity": 7},
+    "Medium": {"blur_style": "pixelate", "blur_intensity": 25},
+    "Heavy": {"blur_style": "pixelate", "blur_intensity": 41},
+    "Maximum": {"blur_style": "solid", "blur_intensity": 41},
+}
+
+# The single stepped slider driving both blur_enabled and (once past "Off") blur_style/intensity.
+BLUR_LEVELS = ["Off", *BLUR_PRESETS]
+
+# The two camera options are independent (a virtual-cam-only setup with no local webcam is
+# valid, e.g. re-streaming the sample video into Zoom), hence a multi-select segmented control
+# rather than mutually exclusive options.
+CAMERA_OPTIONS = ["Webcam", "Virtual camera"]
+
 DEFAULT_CONTROL = {
     "confidence_threshold": 0.5,
     "active_classes": ["person", "car", "laptop"],
     "blur_enabled": False,
     "blur_class": "person",
-    "blur_style": "pixelate",
-    "blur_intensity": 15,
-    "show_metrics": True,
     "virtual_cam_enabled": False,
+    **BLUR_PRESETS[DEFAULT_BLUR_PRESET],
 }
 
-BLUR_STYLES = ["pixelate", "gaussian", "solid"]
+BLUR_STYLES = ["pixelate", "solid"]
 
 # COCO classes YOLOv8n (used by filters/detector.py) was pretrained on.
 COCO_CLASSES = [
@@ -56,6 +73,36 @@ COCO_CLASSES = [
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
     "toothbrush",
 ]
+
+# Sidebar grouping for the Active classes picker. "person" is excluded — it gets its own
+# standalone toggle rather than living in a category list.
+CLASS_CATEGORIES = {
+    "Vehicles": ["bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat"],
+    "Animals": ["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"],
+    "Food": ["banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake"],
+    "Furniture and Appliances": [
+        "chair", "couch", "potted plant", "bed", "dining table", "toilet",
+        "tv", "microwave", "oven", "toaster", "sink", "refrigerator",
+    ],
+    "Street": ["traffic light", "fire hydrant", "stop sign", "parking meter", "bench"],
+    "Sport": [
+        "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat",
+        "baseball glove", "skateboard", "surfboard", "tennis racket",
+    ],
+    "Home and Office": [
+        "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
+        "laptop", "mouse", "keyboard", "suitcase",
+    ],
+    "Objects": [
+        "backpack", "umbrella", "handbag", "tie", "clock", "vase", "scissors",
+        "teddy bear", "hair drier", "toothbrush", "remote", "cell phone", "book",
+    ],
+}
+
+# Every non-"person" COCO class should land in exactly one category — catches a typo'd or
+# omitted class name immediately rather than letting it silently vanish from the sidebar.
+assert {c for classes in CLASS_CATEGORIES.values() for c in classes} == set(COCO_CLASSES) - {"person"}
+assert sum(len(classes) for classes in CLASS_CATEGORIES.values()) == len(COCO_CLASSES) - 1
 
 
 def read_control(path=CONTROL_PATH):
@@ -244,108 +291,265 @@ def init_control_state():
     current = merge_control(DEFAULT_CONTROL, read_control())
     if current["blur_class"] not in COCO_CLASSES:
         current["blur_class"] = DEFAULT_CONTROL["blur_class"]
-    if current["blur_style"] not in BLUR_STYLES:
-        current["blur_style"] = DEFAULT_CONTROL["blur_style"]
+
+    preset_name = blur_preset_for(current["blur_style"], current["blur_intensity"])
+    current["blur_style"] = BLUR_PRESETS[preset_name]["blur_style"]
+    current["blur_intensity"] = BLUR_PRESETS[preset_name]["blur_intensity"]
 
     for field, value in current.items():
         st.session_state[_state_key(field)] = value
+    st.session_state[_state_key("blur_level")] = preset_name if current["blur_enabled"] else "Off"
+    st.session_state[_state_key("camera_options")] = ["Virtual camera"] if current["virtual_cam_enabled"] else []
+
+    active = set(current["active_classes"])
+    st.session_state[_state_key("active_people")] = "person" in active
+    for idx, classes in enumerate(CLASS_CATEGORIES.values()):
+        st.session_state[_state_key(f"active_cat_{idx}")] = [c for c in classes if c in active]
 
     write_control(current)
     st.session_state.control_initialized = True
+
+
+def blur_preset_for(blur_style, blur_intensity):
+    """Reverse-lookup which named preset a (blur_style, blur_intensity) pair corresponds to,
+    falling back to DEFAULT_BLUR_PRESET for anything that doesn't match exactly (e.g. a
+    pre-preset control.json, or a stale/hand-edited value)."""
+
+    for name, preset in BLUR_PRESETS.items():
+        if preset["blur_style"] == blur_style and preset["blur_intensity"] == blur_intensity:
+            return name
+    return DEFAULT_BLUR_PRESET
 
 
 def _write_control_field(field):
     update_control({field: st.session_state[_state_key(field)]})
 
 
+def _write_blur_level():
+    level = st.session_state[_state_key("blur_level")]
+    if level == "Off":
+        update_control({"blur_enabled": False})
+    else:
+        update_control({"blur_enabled": True, **BLUR_PRESETS[level]})
+
+
+def _write_camera_options():
+    update_control({"virtual_cam_enabled": "Virtual camera" in st.session_state[_state_key("camera_options")]})
+
+
+def _write_active_classes():
+    selected = {"person"} if st.session_state[_state_key("active_people")] else set()
+    for idx in range(len(CLASS_CATEGORIES)):
+        selected.update(st.session_state[_state_key(f"active_cat_{idx}")])
+    # COCO order rather than category order, purely so the persisted list reads predictably.
+    update_control({"active_classes": [c for c in COCO_CLASSES if c in selected]})
+
+
+def _category_for_class(class_name):
+    for idx, classes in enumerate(CLASS_CATEGORIES.values()):
+        if class_name in classes:
+            return idx
+    return None
+
+
+def _add_quick_class():
+    """Add whatever was just picked in the search box to its category (or flip the People
+    toggle for "person"), then blank the search box back out so it's ready for the next pick."""
+
+    choice = st.session_state[_state_key("quick_add")]
+    if choice is None:
+        return
+
+    if choice == "person":
+        st.session_state[_state_key("active_people")] = True
+    else:
+        cat_key = _state_key(f"active_cat_{_category_for_class(choice)}")
+        if choice not in st.session_state[cat_key]:
+            st.session_state[cat_key] = [*st.session_state[cat_key], choice]
+
+    st.session_state[_state_key("quick_add")] = None
+    _write_active_classes()
+
+
 def render_virtual_cam_status():
     """Show whether VirtualCamOut actually managed to start, reading the status file it writes
-    on every start/stop attempt. Only relevant while the toggle is on — the status file can
-    lag a toggle flip by up to one autorefresh tick (2s), same latency every other control has."""
+    on every start/stop attempt. Only relevant while "Virtual camera" is selected — the status
+    file can lag a selection change by up to one autorefresh tick (2s), same latency every other
+    control has."""
 
-    if not st.session_state.get(_state_key("virtual_cam_enabled")):
+    if "Virtual camera" not in st.session_state.get(_state_key("camera_options"), []):
         return
 
     status = read_virtual_cam_status()
     if status.get("error"):
-        st.sidebar.error(f"Virtual camera failed to start: {status['error']}")
+        st.caption(f":red[Virtual camera failed to start: {status['error']}]")
     elif status.get("active"):
-        st.sidebar.caption("Virtual camera: active")
+        st.caption(":green[Virtual camera: active]")
     else:
-        st.sidebar.caption("Virtual camera: starting…")
+        st.caption(":yellow[Virtual camera: connecting…]")
+
+
+# Everything in the sidebar except Start/Stop lives in .st-key-pipeline_scroll, which is what
+# actually scrolls; Start/Stop live in .st-key-pipeline_actions, a fixed-height flex sibling that
+# never scrolls — the same split a chat UI uses for its message list vs. its input bar. Getting
+# there means turning Streamlit's own sidebar scroller ([data-testid="stSidebarContent"]) into a
+# flex column instead of letting it scroll directly, then propagating that height constraint down
+# through every layer Streamlit wraps our two containers in: stSidebarUserContent, an anonymous
+# block-display div directly under it, and a stVerticalBlock. Every one of those needs
+# min-height: 0 — a flex item's default min-height is auto (= "never shrink below your content's
+# natural size") — but that stVerticalBlock's own two direct children (a stLayoutWrapper around
+# each of our two containers) are NOT flex-grow by default, so simply zeroing their min-height
+# isn't enough: they still just sit at their natural content height rather than dividing up the
+# available space, and once the sidebar has enough content the two together overflow past the
+# bottom edge and get clipped by the overflow: hidden above. The :has() rules below give each
+# wrapper an explicit flex-grow instead — pipeline_scroll's wrapper grows to fill whatever's left,
+# pipeline_actions' wrapper stays sized to its own content — so the constraint actually reaches
+# pipeline_scroll instead of stopping one level up. The background color on pipeline_actions is
+# hardcoded to Streamlit's default dark-theme secondary background (#262730) since nothing exposes
+# the active theme color as a CSS variable to inherit instead — revisit if a custom
+# .streamlit/config.toml theme shows up.
+SIDEBAR_LAYOUT_CSS = """
+<style>
+[data-testid="stSidebarContent"] {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+[data-testid="stSidebarUserContent"] {
+    /* Streamlit's own default padding-bottom (96px, meant to give a normally-scrolling sidebar
+       breathing room under its last widget) would otherwise sit below pipeline_actions' own
+       padding, making the gap under Start/Stop much bigger than the gap above them. */
+    padding-bottom: 0;
+}
+[data-testid="stSidebarUserContent"],
+[data-testid="stSidebarUserContent"] > div {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+/* Direct-child combinator, deliberately: a descendant selector here would also catch every
+   stVerticalBlock nested inside each widget and category expander further down, stripping their
+   normal row spacing and squashing the whole sidebar together. */
+[data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
+    min-height: 0;
+}
+[data-testid="stLayoutWrapper"]:has(> .st-key-pipeline_scroll) {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+[data-testid="stLayoutWrapper"]:has(> .st-key-pipeline_actions) {
+    flex: 0 0 auto;
+}
+.st-key-pipeline_scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+.st-key-pipeline_actions {
+    flex: 0 0 auto;
+    background-color: #262730;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid rgba(250, 250, 250, 0.2);
+}
+</style>
+"""
 
 
 def render_sidebar(running):
-    st.sidebar.header("Pipeline")
+    st.html(SIDEBAR_LAYOUT_CSS)
 
-    webcam = st.sidebar.checkbox("Use webcam", value=False, disabled=running)
-    webcam_index = st.sidebar.number_input("Webcam index", min_value=0, value=0, step=1, disabled=running)
+    with st.sidebar.container(key="pipeline_scroll"):
+        st.header("Pipeline")
 
-    start_col, stop_col = st.sidebar.columns(2)
-    if start_col.button("Start", disabled=running, width="stretch"):
-        st.session_state.pipeline_process = start_pipeline(webcam, int(webcam_index))
-        st.rerun()
-    if stop_col.button("Stop", disabled=not running, width="stretch"):
-        stop_pipeline(st.session_state.pipeline_process)
-        st.session_state.pipeline_process = None
-        st.rerun()
+        st.segmented_control(
+            "Camera", CAMERA_OPTIONS,
+            selection_mode="multi",
+            default=st.session_state[_state_key("camera_options")],
+            key=_state_key("camera_options"),
+            on_change=_write_camera_options,
+            disabled=running,
+            help=(
+                "Turn the pipeline off to update camera options."
+                if running else
+                "Webcam uses your camera instead of looping the sample video. Virtual camera "
+                "sends output to the OBS Virtual Camera device, selectable as a webcam in "
+                "Zoom/Meet — needs OBS Studio installed with its Virtual Camera started at "
+                "least once (see CLAUDE.md)."
+            ),
+        )
 
-    st.sidebar.caption(f"Status: {'running' if running else 'stopped'}")
+        webcam = "Webcam" in st.session_state[_state_key("camera_options")]
+        webcam_index = (
+            st.number_input("Webcam index", min_value=0, value=0, step=1, disabled=running) if webcam else 0
+        )
 
-    st.sidebar.header("Controls")
+        st.header("Controls")
 
-    st.sidebar.slider(
-        "Confidence threshold", 0.0, 1.0, step=0.05,
-        key=_state_key("confidence_threshold"),
-        on_change=_write_control_field, args=("confidence_threshold",),
-    )
+        st.slider(
+            "Confidence threshold", 0.0, 1.0, step=0.05,
+            key=_state_key("confidence_threshold"),
+            on_change=_write_control_field, args=("confidence_threshold",),
+        )
 
-    st.sidebar.multiselect(
-        "Active classes", COCO_CLASSES,
-        key=_state_key("active_classes"),
-        on_change=_write_control_field, args=("active_classes",),
-    )
+        st.select_slider(
+            "Privacy blur", BLUR_LEVELS,
+            key=_state_key("blur_level"),
+            on_change=_write_blur_level,
+            help="Off disables privacy blur. Maximum is a full blackout rather than heavier pixelation.",
+        )
 
-    st.sidebar.toggle(
-        "Privacy blur",
-        key=_state_key("blur_enabled"),
-        on_change=_write_control_field, args=("blur_enabled",),
-    )
+        if st.session_state[_state_key("blur_level")] != "Off":
+            st.selectbox(
+                "Blur class", COCO_CLASSES,
+                key=_state_key("blur_class"),
+                on_change=_write_control_field, args=("blur_class",),
+            )
 
-    st.sidebar.selectbox(
-        "Blur class", COCO_CLASSES,
-        key=_state_key("blur_class"),
-        on_change=_write_control_field, args=("blur_class",),
-    )
+        st.markdown("**Active classes**")
 
-    st.sidebar.selectbox(
-        "Blur style", BLUR_STYLES,
-        key=_state_key("blur_style"),
-        on_change=_write_control_field, args=("blur_style",),
-    )
+        st.selectbox(
+            "Search classes", sorted(COCO_CLASSES),
+            index=None,
+            placeholder="Type to add a class…",
+            key=_state_key("quick_add"),
+            on_change=_add_quick_class,
+            label_visibility="collapsed",
+        )
 
-    st.sidebar.slider(
-        "Blur intensity", 3, 41, step=1,
-        key=_state_key("blur_intensity"),
-        on_change=_write_control_field, args=("blur_intensity",),
-        help="Block size (pixelate) or blur strength (gaussian). Has no effect on solid fill.",
-    )
+        if st.button("Clear all", width="stretch"):
+            st.session_state[_state_key("active_people")] = False
+            for idx in range(len(CLASS_CATEGORIES)):
+                st.session_state[_state_key(f"active_cat_{idx}")] = []
+            update_control({"active_classes": []})
 
-    st.sidebar.toggle(
-        "Show metrics overlay",
-        key=_state_key("show_metrics"),
-        on_change=_write_control_field, args=("show_metrics",),
-    )
+        st.toggle(
+            "Person",
+            key=_state_key("active_people"),
+            on_change=_write_active_classes,
+        )
 
-    st.sidebar.toggle(
-        "Virtual camera (Zoom/Meet)",
-        key=_state_key("virtual_cam_enabled"),
-        on_change=_write_control_field, args=("virtual_cam_enabled",),
-        help="Sends output to the OBS Virtual Camera device, selectable as a webcam in "
-             "Zoom/Meet. Needs OBS Studio installed with its Virtual Camera started at least "
-             "once (see CLAUDE.md).",
-    )
-    render_virtual_cam_status()
+        for idx, (category, classes) in enumerate(CLASS_CATEGORIES.items()):
+            selected = st.session_state[_state_key(f"active_cat_{idx}")]
+            label = f"{category} ({len(selected)})" if selected else category
+            icon = ":material/check_circle:" if selected else None
+            with st.expander(label, icon=icon):
+                st.multiselect(
+                    category, classes,
+                    key=_state_key(f"active_cat_{idx}"),
+                    on_change=_write_active_classes,
+                    label_visibility="collapsed",
+                )
+
+    with st.sidebar.container(key="pipeline_actions"):
+        start_col, stop_col = st.columns(2)
+        if start_col.button("Start", disabled=running, width="stretch"):
+            st.session_state.pipeline_process = start_pipeline(webcam, int(webcam_index))
+            st.rerun()
+        if stop_col.button("Stop", disabled=not running, width="stretch"):
+            stop_pipeline(st.session_state.pipeline_process)
+            st.session_state.pipeline_process = None
+            st.rerun()
 
 
 def confidence_rows(confidence_samples):
@@ -355,30 +559,26 @@ def confidence_rows(confidence_samples):
 
 
 def render_metrics():
-    if not st.session_state.get(_state_key("show_metrics"), True):
-        return
+    with st.expander("Detection confidence (last 30s)", expanded=False):
+        metrics = read_metrics()
+        counts = metrics.get("class_counts") or {}
+        confidence_samples = metrics.get("confidence_samples") or {}
 
-    st.subheader("Detection confidence (last 30s)")
+        if not confidence_samples:
+            st.caption("No metrics yet — start the pipeline to see live detection confidence.")
+            return
 
-    metrics = read_metrics()
-    counts = metrics.get("class_counts") or {}
-    confidence_samples = metrics.get("confidence_samples") or {}
+        st.metric("Detections (this frame)", sum(counts.values()))
+        st.caption(", ".join(f"{cls}: {n}" for cls, n in counts.items()))
 
-    if not confidence_samples:
-        st.caption("No metrics yet — start the pipeline to see live detection confidence.")
-        return
-
-    st.metric("Detections (this frame)", sum(counts.values()))
-    st.caption(", ".join(f"{cls}: {n}" for cls, n in counts.items()))
-
-    chart = alt.Chart(pd.DataFrame(confidence_rows(confidence_samples))).mark_boxplot(
-        median={"color": "black"},
-        rule={"color": "white"},
-    ).encode(
-        x=alt.X("class:N", title="Class"),
-        y=alt.Y("confidence:Q", title="Confidence", scale=alt.Scale(domain=[0, 1])),
-    )
-    st.altair_chart(chart, width="stretch")
+        chart = alt.Chart(pd.DataFrame(confidence_rows(confidence_samples))).mark_boxplot(
+            median={"color": "black"},
+            rule={"color": "white"},
+        ).encode(
+            x=alt.X("class:N", title="Class"),
+            y=alt.Y("confidence:Q", title="Confidence", scale=alt.Scale(domain=[0, 1])),
+        )
+        st.altair_chart(chart, width="stretch")
 
 
 STREAM_HEIGHT = 500
@@ -475,6 +675,7 @@ def main():
     live_tab, batch_tab = st.tabs(["Live", "Upload & batch"])
     with live_tab:
         render_stream(running)
+        render_virtual_cam_status()
         render_metrics()
     with batch_tab:
         render_batch_tab()
