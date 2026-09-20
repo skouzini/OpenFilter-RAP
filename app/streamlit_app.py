@@ -307,7 +307,7 @@ def init_control_state():
     # Webcam and File aren't persisted (they're start-time-only source/visibility choices, not
     # something a running filter can react to), so they always reset to this default each
     # session — same as Webcam already did before Input/Output were split apart.
-    st.session_state[_state_key("input_options")] = ["File"]
+    st.session_state[_state_key("input_options")] = []
     st.session_state[_state_key("output_options")] = ["Viewer", *(["Virtual cam"] if current["virtual_cam_enabled"] else [])]
 
     active = set(current["active_classes"])

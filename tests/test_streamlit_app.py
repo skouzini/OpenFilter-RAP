@@ -263,11 +263,11 @@ def test_input_and_output_controls_are_independent(tmp_path, monkeypatch):
     assert not _output_segmented_control(at).disabled
 
 
-def test_input_defaults_to_file_and_output_defaults_to_viewer(tmp_path, monkeypatch):
+def test_input_defaults_to_none_and_output_defaults_to_viewer(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     at = AppTest.from_file(APP_PATH).run()
 
-    assert _input_segmented_control(at).value == ["File"]
+    assert _input_segmented_control(at).value == []
     assert _output_segmented_control(at).value == ["Viewer"]
 
 
@@ -282,9 +282,13 @@ def test_viewer_section_hidden_when_deselected(tmp_path, monkeypatch):
     assert not any("Start the pipeline" in i.value for i in at.info)
 
 
-def test_file_uploader_hidden_when_file_deselected_from_input(tmp_path, monkeypatch):
+def test_file_uploader_shown_only_when_file_selected_in_input(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     at = AppTest.from_file(APP_PATH).run()
+
+    assert len(at.file_uploader) == 0
+
+    _input_segmented_control(at).set_value(["File"]).run()
 
     assert len(at.file_uploader) == 1
 
@@ -599,6 +603,7 @@ def test_batch_tab_runs_pipeline_and_shows_both_images(tmp_path, monkeypatch):
     assert ok
 
     at = AppTest.from_file(APP_PATH).run()
+    _input_segmented_control(at).set_value(["File"]).run()
     uploader = at.file_uploader[0]
     uploader.set_value(("frame.png", encoded.tobytes(), "image/png")).run(timeout=120)
 
@@ -616,6 +621,7 @@ def test_batch_tab_does_not_relaunch_for_a_run_already_in_flight(tmp_path, monke
     monkeypatch.chdir(tmp_path)
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _input_segmented_control(at).set_value(["File"]).run()
     uploader = at.file_uploader[0]
     uploader.set_value(("frame.png", b"stand-in bytes, this run must never reach the subprocess", "image/png"))
     file_id = uploader._files[0][0]  # AppTest assigns this synchronously in set_value(), pre-run
