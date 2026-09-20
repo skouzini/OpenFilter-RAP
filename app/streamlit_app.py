@@ -401,17 +401,32 @@ def render_batch_tab():
 
     if batch_run_needed(st.session_state, uploaded.file_id):
         st.session_state.batch_running_file_id = uploaded.file_id
-        try:
-            with st.spinner("Running detection..."):
-                input_path, output_path = process_uploaded_image(uploaded)
-        except Exception as e:
-            st.error(f"Batch pipeline failed: {e}")
-            st.session_state.pop("batch_running_file_id", None)
-            return
+        error = None
 
-        st.session_state.pop("batch_running_file_id", None)
-        st.session_state.batch_file_id = uploaded.file_id
-        st.session_state.batch_result = (input_path, output_path)
+        # Record the outcome INSIDE the spinner's own `with` block, before it exits — not after.
+        # st.spinner.__exit__() itself makes a Streamlit rendering call (to remove the spinner),
+        # and a script run that's been superseded by a newer rerun (st_autorefresh firing again
+        # while this run was still blocked in subprocess.run()) can be cut off at exactly that
+        # kind of call. If we set batch_file_id/batch_result and cleared the running-lock only
+        # AFTER the `with` block, the detection could finish successfully and then this whole run
+        # gets stopped right at the spinner's exit, before those lines ever ran — leaving the
+        # lock permanently set and the tab stuck showing "Running detection..." forever, despite
+        # the batch already having produced a real result. Confirmed as a real failure mode, not
+        # hypothetical.
+        with st.spinner("Running detection..."):
+            try:
+                input_path, output_path = process_uploaded_image(uploaded)
+            except Exception as e:
+                error = str(e)
+            else:
+                st.session_state.batch_file_id = uploaded.file_id
+                st.session_state.batch_result = (input_path, output_path)
+            finally:
+                st.session_state.pop("batch_running_file_id", None)
+
+        if error is not None:
+            st.error(f"Batch pipeline failed: {error}")
+            return
 
     if st.session_state.get("batch_file_id") != uploaded.file_id:
         # Still running (batch_run_needed was False because batch_running_file_id matched, not
