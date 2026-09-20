@@ -6,7 +6,7 @@ import sys
 from streamlit.testing.v1 import AppTest
 
 import app.streamlit_app as streamlit_app_module
-from app.streamlit_app import DEFAULT_CONTROL, build_batch_args, confidence_rows, expected_batch_error_path, expected_batch_output_path, is_running, merge_control, prepare_batch_work_dir, read_control, read_metrics, read_virtual_cam_status, run_batch_pipeline, sanitized_upload_filename, update_control, webvis_ready
+from app.streamlit_app import CLASS_CATEGORIES, DEFAULT_CONTROL, build_batch_args, confidence_rows, expected_batch_error_path, expected_batch_output_path, is_running, merge_control, prepare_batch_work_dir, read_control, read_metrics, read_virtual_cam_status, run_batch_pipeline, sanitized_upload_filename, update_control, webvis_ready
 
 APP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "streamlit_app.py")
 
@@ -112,41 +112,92 @@ def test_app_preserves_existing_control_values_on_first_load(tmp_path, monkeypat
     assert on_disk["active_classes"] == DEFAULT_CONTROL["active_classes"]
 
 
-def test_metrics_section_hidden_when_show_metrics_toggled_off(tmp_path, monkeypatch):
+def test_metrics_render_inside_an_expander_in_the_main_window(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "metrics.json").write_text(
         json.dumps({"class_counts": {"person": 2}, "confidence_samples": {"person": [0.8, 0.9]}})
     )
 
     at = AppTest.from_file(APP_PATH).run()
-    assert "Detection confidence (last 30s)" in [s.value for s in at.subheader]
 
-    show_metrics_toggle = [t for t in at.sidebar.toggle if t.label == "Show metrics overlay"][0]
-    show_metrics_toggle.set_value(False).run()
-
-    assert "Detection confidence (last 30s)" not in [s.value for s in at.subheader]
+    expander = [e for e in at.expander if e.label == "Detection confidence (last 30s)"][0]
+    assert expander.metric[0].value == "2"
 
 
-def test_changing_blur_style_persists_correctly(tmp_path, monkeypatch):
+def test_metrics_expander_shows_placeholder_before_any_metrics(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    expander = [e for e in at.expander if e.label == "Detection confidence (last 30s)"][0]
+    assert "No metrics yet" in expander.caption[0].value
+
+
+def _blur_level_slider(at):
+    return [s for s in at.sidebar.select_slider if s.label == "Privacy blur"][0]
+
+
+def test_blur_level_defaults_to_off(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     at = AppTest.from_file(APP_PATH).run()
 
-    style_select = [s for s in at.sidebar.selectbox if s.label == "Blur style"][0]
-    style_select.set_value("gaussian").run()
+    assert _blur_level_slider(at).value == "Off"
+    assert "Blur class" not in [s.label for s in at.sidebar.selectbox]
 
     on_disk = json.loads((tmp_path / "control.json").read_text())
-    assert on_disk["blur_style"] == "gaussian"
+    assert on_disk["blur_enabled"] is False
 
 
-def test_changing_blur_intensity_persists_correctly(tmp_path, monkeypatch):
+def test_blur_controls_shown_for_non_off_level(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(
+        json.dumps({"blur_enabled": True, "blur_style": "pixelate", "blur_intensity": 25})
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert _blur_level_slider(at).value == "Medium"
+    assert "Blur class" in [s.label for s in at.sidebar.selectbox]
+
+
+def test_moving_blur_level_off_off_enables_blur_at_that_strength(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     at = AppTest.from_file(APP_PATH).run()
 
-    intensity_slider = [s for s in at.sidebar.slider if s.label == "Blur intensity"][0]
-    intensity_slider.set_value(25).run()
+    _blur_level_slider(at).set_value("Heavy").run()
 
     on_disk = json.loads((tmp_path / "control.json").read_text())
-    assert on_disk["blur_intensity"] == 25
+    assert on_disk["blur_enabled"] is True
+    assert on_disk["blur_style"] == "pixelate"
+    assert on_disk["blur_intensity"] == 41
+
+
+def test_maximum_blur_level_sets_solid_fill(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    _blur_level_slider(at).set_value("Maximum").run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_enabled"] is True
+    assert on_disk["blur_style"] == "solid"
+    assert on_disk["blur_intensity"] == 41
+
+
+def test_moving_blur_level_to_off_disables_blur_without_losing_strength(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(
+        json.dumps({"blur_enabled": True, "blur_style": "pixelate", "blur_intensity": 41})
+    )
+
+    at = AppTest.from_file(APP_PATH).run()
+    _blur_level_slider(at).set_value("Off").run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["blur_enabled"] is False
+    assert on_disk["blur_style"] == "pixelate"
+    assert on_disk["blur_intensity"] == 41
+    assert "Blur class" not in [s.label for s in at.sidebar.selectbox]
 
 
 def test_read_virtual_cam_status_returns_empty_dict_when_file_missing(tmp_path):
@@ -167,63 +218,195 @@ def test_read_virtual_cam_status_parses_existing_file(tmp_path):
     assert read_virtual_cam_status(str(status_path)) == {"active": True, "error": None}
 
 
-def test_toggling_virtual_cam_persists_to_control_json(tmp_path, monkeypatch):
+def _camera_segmented_control(at):
+    return [s for s in at.sidebar.segmented_control if s.label == "Camera"][0]
+
+
+def test_selecting_virtual_camera_persists_to_control_json(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     at = AppTest.from_file(APP_PATH).run()
 
-    vcam_toggle = [t for t in at.sidebar.toggle if t.label == "Virtual camera (Zoom/Meet)"][0]
-    vcam_toggle.set_value(True).run()
+    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
 
     on_disk = json.loads((tmp_path / "control.json").read_text())
     assert on_disk["virtual_cam_enabled"] is True
 
 
-def test_virtual_cam_status_hidden_when_toggle_off(tmp_path, monkeypatch):
+def test_webcam_index_hidden_unless_webcam_selected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert "Webcam index" not in [n.label for n in at.sidebar.number_input]
+
+    _camera_segmented_control(at).set_value(["Webcam"]).run()
+
+    assert "Webcam index" in [n.label for n in at.sidebar.number_input]
+
+
+def test_virtual_cam_status_hidden_when_not_selected(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "virtual_cam_status.json").write_text(json.dumps({"active": True, "error": None}))
 
     at = AppTest.from_file(APP_PATH).run()
 
-    assert "Virtual camera: active" not in [c.value for c in at.sidebar.caption]
+    assert not any("Virtual camera" in c.value for c in at.caption)
 
 
-def test_virtual_cam_status_shows_active_when_toggle_on(tmp_path, monkeypatch):
+def test_virtual_cam_status_shows_connecting_in_yellow_before_active(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    at = AppTest.from_file(APP_PATH).run()
+    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
+
+    assert ":yellow[Virtual camera: connecting…]" in [c.value for c in at.caption]
+
+
+def test_virtual_cam_status_shows_active_in_green_when_selected(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "virtual_cam_status.json").write_text(json.dumps({"active": True, "error": None}))
 
     at = AppTest.from_file(APP_PATH).run()
-    vcam_toggle = [t for t in at.sidebar.toggle if t.label == "Virtual camera (Zoom/Meet)"][0]
-    vcam_toggle.set_value(True).run()
+    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
 
-    assert "Virtual camera: active" in [c.value for c in at.sidebar.caption]
+    assert ":green[Virtual camera: active]" in [c.value for c in at.caption]
 
 
-def test_virtual_cam_status_shows_error_when_toggle_on_and_failed(tmp_path, monkeypatch):
+def test_virtual_cam_status_shows_error_when_selected_and_failed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "virtual_cam_status.json").write_text(
         json.dumps({"active": False, "error": "OBS Virtual Camera is not installed"})
     )
 
     at = AppTest.from_file(APP_PATH).run()
-    vcam_toggle = [t for t in at.sidebar.toggle if t.label == "Virtual camera (Zoom/Meet)"][0]
-    vcam_toggle.set_value(True).run()
+    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
 
-    assert any("OBS Virtual Camera is not installed" in e.value for e in at.sidebar.error)
+    assert any(
+        c.value.startswith(":red[") and "OBS Virtual Camera is not installed" in c.value for c in at.caption
+    )
+
+
+def _people_toggle(at):
+    return [t for t in at.sidebar.toggle if t.label == "Person"][0]
 
 
 def test_changing_one_control_does_not_reset_another(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": []}))
 
     at = AppTest.from_file(APP_PATH).run()
-    blur_toggle = [t for t in at.sidebar.toggle if t.label == "Privacy blur"][0]
-    blur_toggle.set_value(True).run()
+    _blur_level_slider(at).set_value("Medium").run()
 
-    multiselect = at.sidebar.multiselect[0]
-    multiselect.set_value(["person"]).run()
+    at = _people_toggle(at).set_value(True).run()
 
     on_disk = json.loads((tmp_path / "control.json").read_text())
     assert on_disk["blur_enabled"] is True
     assert on_disk["active_classes"] == ["person"]
+
+
+def _category_multiselect(at, category):
+    # Not routed through at.sidebar.expander: AppTest's element tree silently drops an
+    # expander once it carries a non-None `icon` (which category expanders do once they have a
+    # selection — see render_sidebar) even though it renders fine in a real browser. The
+    # multiselect inside it is still reachable directly, keyed by its own (visually collapsed)
+    # label, which is always just the category name.
+    return [m for m in at.sidebar.multiselect if m.label == category][0]
+
+
+def test_class_categories_partition_every_coco_class_except_person():
+    from app.streamlit_app import COCO_CLASSES
+
+    categorized = [c for classes in CLASS_CATEGORIES.values() for c in classes]
+    assert sorted(categorized) == sorted(set(COCO_CLASSES) - {"person"})
+    assert len(categorized) == len(set(categorized))
+
+
+def test_selecting_a_class_within_its_category_persists_correctly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": []}))
+    category, classes = next(iter(CLASS_CATEGORIES.items()))
+
+    at = AppTest.from_file(APP_PATH).run()
+    _category_multiselect(at, category).set_value([classes[0]]).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["active_classes"] == [classes[0]]
+
+
+def test_selections_across_categories_and_people_all_persist_together(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": []}))
+    categories = list(CLASS_CATEGORIES.items())
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _people_toggle(at).set_value(True).run()
+    at = _category_multiselect(at, categories[0][0]).set_value([categories[0][1][0]]).run()
+    at = _category_multiselect(at, categories[1][0]).set_value([categories[1][1][0]]).run()
+
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert set(on_disk["active_classes"]) == {"person", categories[0][1][0], categories[1][1][0]}
+
+
+def test_clear_all_resets_people_and_every_category(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    category, classes = next(iter(CLASS_CATEGORIES.items()))
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": ["person", classes[0]]}))
+
+    at = AppTest.from_file(APP_PATH).run()
+    assert _people_toggle(at).value is True
+    assert _category_multiselect(at, category).value == [classes[0]]
+
+    clear_button = [b for b in at.sidebar.button if b.label == "Clear all"][0]
+    at = clear_button.click().run()
+
+    assert _people_toggle(at).value is False
+    assert _category_multiselect(at, category).value == []
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["active_classes"] == []
+
+
+def _quick_add_box(at):
+    return [s for s in at.sidebar.selectbox if s.label == "Search classes"][0]
+
+
+def test_quick_add_selects_class_into_its_category_and_clears_itself(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": []}))
+    category, classes = next(iter(CLASS_CATEGORIES.items()))
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _quick_add_box(at).set_value(classes[0]).run()
+
+    assert _quick_add_box(at).value is None
+    assert _category_multiselect(at, category).value == [classes[0]]
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["active_classes"] == [classes[0]]
+
+
+def test_quick_add_person_enables_the_people_toggle(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": []}))
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _quick_add_box(at).set_value("person").run()
+
+    assert _people_toggle(at).value is True
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["active_classes"] == ["person"]
+
+
+def test_quick_add_does_not_duplicate_an_already_selected_class(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    category, classes = next(iter(CLASS_CATEGORIES.items()))
+    (tmp_path / "control.json").write_text(json.dumps({"active_classes": [classes[0]]}))
+
+    at = AppTest.from_file(APP_PATH).run()
+    at = _quick_add_box(at).set_value(classes[0]).run()
+
+    assert _category_multiselect(at, category).value == [classes[0]]
+    on_disk = json.loads((tmp_path / "control.json").read_text())
+    assert on_disk["active_classes"] == [classes[0]]
+
+
 
 
 class FakeProcess:

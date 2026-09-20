@@ -7,7 +7,7 @@ from openfilter.filter_runtime.filter import Frame
 from filters.annotator import class_counts, draw_detections, group_confidences_by_class, prune_old_samples, visible_detections
 from filters.control import ControlMixin
 from filters.detector import boxes_to_detections, filter_detections
-from filters.privacy_blur import blur_frame, blur_region, gaussian_blur_region, pixelate_region, solid_fill_region
+from filters.privacy_blur import blur_frame, blur_region, pixelate_region, solid_fill_region
 from filters.virtual_cam_out import should_start, should_stop
 
 
@@ -159,53 +159,6 @@ def test_solid_fill_region_returns_the_image():
     assert result is image
 
 
-def test_gaussian_blur_region_smooths_an_impulse():
-    image = np.zeros((40, 40, 3), dtype=np.uint8)
-    image[19, 19] = (255, 255, 255)
-
-    gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
-
-    assert image[19, 19, 0] < 255
-    assert image[19, 20, 0] > 0
-
-
-def test_gaussian_blur_region_leaves_pixels_outside_box_unchanged():
-    image = np.zeros((40, 40, 3), dtype=np.uint8)
-    image[35, 35] = (7, 8, 9)
-
-    gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
-
-    assert tuple(image[35, 35]) == (7, 8, 9)
-
-
-def test_gaussian_blur_region_high_intensity_blurs_much_more_than_low_intensity():
-    def make_image():
-        image = np.zeros((60, 60, 3), dtype=np.uint8)
-        image[20:40, 20:40] = 255
-        return image
-
-    box = [5, 5, 55, 55]
-    low, high = make_image(), make_image()
-
-    gaussian_blur_region(low, box, intensity=3)
-    gaussian_blur_region(high, box, intensity=41)
-
-    low_variance = low[5:55, 5:55].astype(float).var()
-    high_variance = high[5:55, 5:55].astype(float).var()
-
-    # the slider should sweep from "barely blurred" to "nearly flat" across its range,
-    # not just shave a little off the top
-    assert high_variance < low_variance * 0.15
-
-
-def test_gaussian_blur_region_returns_the_image():
-    image = np.zeros((40, 40, 3), dtype=np.uint8)
-
-    result = gaussian_blur_region(image, [10, 10, 30, 30], intensity=9)
-
-    assert result is image
-
-
 def test_blur_region_dispatches_to_pixelate():
     image = np.zeros((40, 40, 3), dtype=np.uint8)
     image[10:30, 10:30, 0] = (np.arange(20 * 20).reshape(20, 20) % 256).astype(np.uint8)
@@ -214,15 +167,6 @@ def test_blur_region_dispatches_to_pixelate():
 
     block = image[10:20, 10:20, 0]
     assert (block == block[0, 0]).all()
-
-
-def test_blur_region_dispatches_to_gaussian():
-    image = np.zeros((40, 40, 3), dtype=np.uint8)
-    image[19, 19] = (255, 255, 255)
-
-    blur_region(image, [10, 10, 30, 30], "gaussian", 9)
-
-    assert image[19, 19, 0] < 255
 
 
 def test_blur_region_dispatches_to_solid():
