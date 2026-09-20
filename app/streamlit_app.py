@@ -1,6 +1,9 @@
-"""Streamlit Tab 1: Start/stop the live pipeline as a subprocess, expose sidebar
+"""Streamlit control UI: Start/stop the live pipeline as a subprocess, expose sidebar
 controls that write to control.json (polled live by the running filters via
-ControlMixin — see filters/control.py), and embed Webvis's own MJPEG stream.
+ControlMixin — see filters/control.py), embed Webvis's own MJPEG stream, and run the
+one-shot batch/annotation pipeline for an uploaded image. All in one page — Input/Output
+segmented controls in the sidebar choose what's visible below (Viewer, file annotation),
+in Viewer -> file annotation -> Metrics order.
 """
 
 import json
@@ -43,10 +46,12 @@ BLUR_PRESETS = {
 # The single stepped slider driving both blur_enabled and (once past "Off") blur_style/intensity.
 BLUR_LEVELS = ["Off", *BLUR_PRESETS]
 
-# The two camera options are independent (a virtual-cam-only setup with no local webcam is
-# valid, e.g. re-streaming the sample video into Zoom), hence a multi-select segmented control
+# Input and Output are independent axes (a webcam feed and a file annotation can run at once —
+# see the Tab 1/Tab 2 concurrency work; a virtual-cam-only setup with no local webcam is valid
+# too, e.g. re-streaming the sample video into Zoom), hence multi-select segmented controls
 # rather than mutually exclusive options.
-CAMERA_OPTIONS = ["Webcam", "Virtual camera"]
+INPUT_OPTIONS = ["File", "Webcam"]
+OUTPUT_OPTIONS = ["Viewer", "Virtual cam"]
 
 DEFAULT_CONTROL = {
     "confidence_threshold": 0.5,
@@ -299,7 +304,11 @@ def init_control_state():
     for field, value in current.items():
         st.session_state[_state_key(field)] = value
     st.session_state[_state_key("blur_level")] = preset_name if current["blur_enabled"] else "Off"
-    st.session_state[_state_key("camera_options")] = ["Virtual camera"] if current["virtual_cam_enabled"] else []
+    # Webcam and File aren't persisted (they're start-time-only source/visibility choices, not
+    # something a running filter can react to), so they always reset to this default each
+    # session — same as Webcam already did before Input/Output were split apart.
+    st.session_state[_state_key("input_options")] = []
+    st.session_state[_state_key("output_options")] = ["Viewer", *(["Virtual cam"] if current["virtual_cam_enabled"] else [])]
 
     active = set(current["active_classes"])
     st.session_state[_state_key("active_people")] = "person" in active
@@ -333,8 +342,8 @@ def _write_blur_level():
         update_control({"blur_enabled": True, **BLUR_PRESETS[level]})
 
 
-def _write_camera_options():
-    update_control({"virtual_cam_enabled": "Virtual camera" in st.session_state[_state_key("camera_options")]})
+def _write_output_options():
+    update_control({"virtual_cam_enabled": "Virtual cam" in st.session_state[_state_key("output_options")]})
 
 
 def _write_active_classes():
@@ -373,11 +382,11 @@ def _add_quick_class():
 
 def render_virtual_cam_status():
     """Show whether VirtualCamOut actually managed to start, reading the status file it writes
-    on every start/stop attempt. Only relevant while "Virtual camera" is selected — the status
-    file can lag a selection change by up to one autorefresh tick (2s), same latency every other
-    control has."""
+    on every start/stop attempt. Only relevant while "Virtual cam" is selected in Output — the
+    status file can lag a selection change by up to one autorefresh tick (2s), same latency
+    every other control has."""
 
-    if "Virtual camera" not in st.session_state.get(_state_key("camera_options"), []):
+    if "Virtual cam" not in st.session_state.get(_state_key("output_options"), []):
         return
 
     status = read_virtual_cam_status()
@@ -462,26 +471,46 @@ def render_sidebar(running):
     with st.sidebar.container(key="pipeline_scroll"):
         st.header("Pipeline")
 
+        # Input picks a pipeline source (Webcam) and/or exposes the file-annotation feature
+        # (File) — disabled while running because Webcam can't change a live VideoIn's source
+        # without a restart, and disabling the whole control (rather than one option) is the
+        # same tradeoff the combined Camera control made before Input/Output were split apart.
         st.segmented_control(
-            "Camera", CAMERA_OPTIONS,
+            "Input", INPUT_OPTIONS,
             selection_mode="multi",
-            default=st.session_state[_state_key("camera_options")],
-            key=_state_key("camera_options"),
-            on_change=_write_camera_options,
+            default=st.session_state[_state_key("input_options")],
+            key=_state_key("input_options"),
             disabled=running,
             help=(
-                "Turn the pipeline off to update camera options."
+                "Turn the pipeline off to update input options."
                 if running else
-                "Webcam uses your camera instead of looping the sample video. Virtual camera "
-                "sends output to the OBS Virtual Camera device, selectable as a webcam in "
-                "Zoom/Meet — needs OBS Studio installed with its Virtual Camera started at "
-                "least once (see CLAUDE.md)."
+                "File lets you upload a single image below to annotate. Webcam uses your "
+                "camera for the live pipeline instead of looping the sample video."
             ),
         )
 
-        webcam = "Webcam" in st.session_state[_state_key("camera_options")]
+        webcam = "Webcam" in st.session_state[_state_key("input_options")]
         webcam_index = (
             st.number_input("Webcam index", min_value=0, value=0, step=1, disabled=running) if webcam else 0
+        )
+
+        if "File" in st.session_state[_state_key("input_options")]:
+            render_file_uploader()
+
+        # Output picks where results go — never disabled while running, since Viewer is a pure
+        # display toggle and Virtual cam is already live-reconfigurable via control.json.
+        st.segmented_control(
+            "Output", OUTPUT_OPTIONS,
+            selection_mode="multi",
+            default=st.session_state[_state_key("output_options")],
+            key=_state_key("output_options"),
+            on_change=_write_output_options,
+            help=(
+                "Viewer shows the live stream on this page. Virtual cam sends output to the "
+                "OBS Virtual Camera device, selectable as a webcam in Zoom/Meet — needs OBS "
+                "Studio installed with its Virtual Camera started at least once (see "
+                "CLAUDE.md)."
+            ),
         )
 
         st.header("Controls")
@@ -612,8 +641,14 @@ def render_stream(running):
         )
 
 
-def render_batch_tab():
-    st.subheader("Upload an image")
+def render_file_uploader():
+    """Sidebar half of the file-annotation feature: just the upload widget and the bookkeeping
+    to stash a genuinely new upload's work dir into session_state. Rendering the result (or
+    running the batch pipeline against it) happens separately in render_file_annotation(),
+    which reads that same session_state — the two are split across sidebar and main content but
+    share state because Streamlit re-runs the whole script top-to-bottom on every interaction.
+    """
+
     uploaded = st.file_uploader("Choose an image", type=BATCH_UPLOAD_TYPES, key="batch_uploader")
 
     if uploaded is None:
@@ -629,13 +664,26 @@ def render_batch_tab():
         st.session_state.batch_output_dir = output_dir
         st.session_state.pop("batch_running_file_id", None)
 
+
+def render_file_annotation():
+    """Main-content half of the file-annotation feature — see render_file_uploader(). Renders
+    nothing until an upload has been seen this session, matching the pre-split behavior where
+    this same section returned early with nothing shown."""
+
+    st.subheader("File annotation")
+
+    if "batch_upload_file_id" not in st.session_state:
+        st.caption("Upload an image in the sidebar to see it annotated here.")
+        return
+
     input_path = st.session_state.batch_input_path
     output_dir = st.session_state.batch_output_dir
     output_path = expected_batch_output_path(output_dir)
 
     if not os.path.exists(output_path):
-        if st.session_state.get("batch_running_file_id") != uploaded.file_id:
-            st.session_state.batch_running_file_id = uploaded.file_id
+        upload_id = st.session_state.batch_upload_file_id
+        if st.session_state.get("batch_running_file_id") != upload_id:
+            st.session_state.batch_running_file_id = upload_id
             with st.spinner("Running detection..."):
                 run_batch_pipeline(os.path.dirname(input_path), output_dir)
 
@@ -672,13 +720,12 @@ def main():
 
     render_sidebar(running)
 
-    live_tab, batch_tab = st.tabs(["Live", "Upload & batch"])
-    with live_tab:
+    if "Viewer" in st.session_state[_state_key("output_options")]:
         render_stream(running)
-        render_virtual_cam_status()
-        render_metrics()
-    with batch_tab:
-        render_batch_tab()
+    render_virtual_cam_status()
+    if "File" in st.session_state[_state_key("input_options")]:
+        render_file_annotation()
+    render_metrics()
 
 
 if __name__ == "__main__":

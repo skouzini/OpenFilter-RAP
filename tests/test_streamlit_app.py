@@ -218,15 +218,19 @@ def test_read_virtual_cam_status_parses_existing_file(tmp_path):
     assert read_virtual_cam_status(str(status_path)) == {"active": True, "error": None}
 
 
-def _camera_segmented_control(at):
-    return [s for s in at.sidebar.segmented_control if s.label == "Camera"][0]
+def _input_segmented_control(at):
+    return [s for s in at.sidebar.segmented_control if s.label == "Input"][0]
 
 
-def test_selecting_virtual_camera_persists_to_control_json(tmp_path, monkeypatch):
+def _output_segmented_control(at):
+    return [s for s in at.sidebar.segmented_control if s.label == "Output"][0]
+
+
+def test_selecting_virtual_cam_persists_to_control_json(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     at = AppTest.from_file(APP_PATH).run()
 
-    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
+    _output_segmented_control(at).set_value(["Virtual cam"]).run()
 
     on_disk = json.loads((tmp_path / "control.json").read_text())
     assert on_disk["virtual_cam_enabled"] is True
@@ -238,9 +242,59 @@ def test_webcam_index_hidden_unless_webcam_selected(tmp_path, monkeypatch):
 
     assert "Webcam index" not in [n.label for n in at.sidebar.number_input]
 
-    _camera_segmented_control(at).set_value(["Webcam"]).run()
+    _input_segmented_control(at).set_value(["Webcam"]).run()
 
     assert "Webcam index" in [n.label for n in at.sidebar.number_input]
+
+
+def test_input_and_output_controls_are_independent(tmp_path, monkeypatch):
+    """Regression test: Input/Output used to be a single 'Camera' multi-select conflating a
+    pipeline source choice (needs a restart) with an output destination (Virtual cam, which is
+    live-reconfigurable via control.json). Selecting Webcam must not disturb Output, and
+    Output must stay editable while the pipeline runs, unlike Input."""
+
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    _input_segmented_control(at).set_value(["Webcam"]).run()
+    assert _output_segmented_control(at).value == ["Viewer"]
+
+    _output_segmented_control(at).set_value(["Virtual cam"]).run()
+    assert not _output_segmented_control(at).disabled
+
+
+def test_input_defaults_to_none_and_output_defaults_to_viewer(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert _input_segmented_control(at).value == []
+    assert _output_segmented_control(at).value == ["Viewer"]
+
+
+def test_viewer_section_hidden_when_deselected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert any("Start the pipeline" in i.value for i in at.info)
+
+    _output_segmented_control(at).set_value([]).run()
+
+    assert not any("Start the pipeline" in i.value for i in at.info)
+
+
+def test_file_uploader_shown_only_when_file_selected_in_input(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    at = AppTest.from_file(APP_PATH).run()
+
+    assert len(at.file_uploader) == 0
+
+    _input_segmented_control(at).set_value(["File"]).run()
+
+    assert len(at.file_uploader) == 1
+
+    _input_segmented_control(at).set_value(["Webcam"]).run()
+
+    assert len(at.file_uploader) == 0
 
 
 def test_virtual_cam_status_hidden_when_not_selected(tmp_path, monkeypatch):
@@ -256,7 +310,7 @@ def test_virtual_cam_status_shows_connecting_in_yellow_before_active(tmp_path, m
     monkeypatch.chdir(tmp_path)
 
     at = AppTest.from_file(APP_PATH).run()
-    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
+    _output_segmented_control(at).set_value(["Virtual cam"]).run()
 
     assert ":yellow[Virtual camera: connecting…]" in [c.value for c in at.caption]
 
@@ -266,7 +320,7 @@ def test_virtual_cam_status_shows_active_in_green_when_selected(tmp_path, monkey
     (tmp_path / "virtual_cam_status.json").write_text(json.dumps({"active": True, "error": None}))
 
     at = AppTest.from_file(APP_PATH).run()
-    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
+    _output_segmented_control(at).set_value(["Virtual cam"]).run()
 
     assert ":green[Virtual camera: active]" in [c.value for c in at.caption]
 
@@ -278,7 +332,7 @@ def test_virtual_cam_status_shows_error_when_selected_and_failed(tmp_path, monke
     )
 
     at = AppTest.from_file(APP_PATH).run()
-    _camera_segmented_control(at).set_value(["Virtual camera"]).run()
+    _output_segmented_control(at).set_value(["Virtual cam"]).run()
 
     assert any(
         c.value.startswith(":red[") and "OBS Virtual Camera is not installed" in c.value for c in at.caption
@@ -549,6 +603,7 @@ def test_batch_tab_runs_pipeline_and_shows_both_images(tmp_path, monkeypatch):
     assert ok
 
     at = AppTest.from_file(APP_PATH).run()
+    _input_segmented_control(at).set_value(["File"]).run()
     uploader = at.file_uploader[0]
     uploader.set_value(("frame.png", encoded.tobytes(), "image/png")).run(timeout=120)
 
@@ -566,6 +621,7 @@ def test_batch_tab_does_not_relaunch_for_a_run_already_in_flight(tmp_path, monke
     monkeypatch.chdir(tmp_path)
 
     at = AppTest.from_file(APP_PATH).run()
+    at = _input_segmented_control(at).set_value(["File"]).run()
     uploader = at.file_uploader[0]
     uploader.set_value(("frame.png", b"stand-in bytes, this run must never reach the subprocess", "image/png"))
     file_id = uploader._files[0][0]  # AppTest assigns this synchronously in set_value(), pre-run
