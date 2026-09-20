@@ -3,10 +3,12 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 import cv2
 import pytest
 
+from app.streamlit_app import WEBVIS_URL, webvis_ready
 from pipelines.batch import OUTPUT_FILENAME, allocate_port_pair, finalize_output
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,3 +110,62 @@ def test_batch_pipeline_produces_annotated_output(tmp_path, fixture_image_path):
     output_image = cv2.imread(str(output_path))
     assert output_image is not None
     assert output_image.shape[:2] == cv2.imread(fixture_image_path).shape[:2]
+
+
+def test_batch_pipeline_succeeds_while_live_pipeline_is_running(tmp_path, fixture_image_path):
+    """The design doc calls out that Tab 1's live pipeline could be running while someone uses
+    Tab 2, but that was never verified end-to-end. Starts the real pipelines/live.py (default
+    looped-sample-video source, no --webcam — needs no camera permission) as a background
+    subprocess, waits for it to actually be serving frames, then runs a real batch pipeline
+    against it. live.py binds fixed ports 5550-5557; batch.py allocates its own ports fresh via
+    allocate_port_pair() specifically to avoid colliding with that fixed range (or another
+    concurrent batch run) — this is the real-subprocess proof that split holds up, not just a
+    port-arithmetic argument. Slow: loads YOLO twice (once per pipeline).
+    """
+
+    live_process = subprocess.Popen(
+        [sys.executable, "pipelines/live.py"], cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    try:
+        deadline = time.time() + 60
+        while not webvis_ready(url=WEBVIS_URL, timeout=1):
+            if live_process.poll() is not None:
+                pytest.fail(f"pipelines/live.py exited early with code {live_process.returncode}")
+            if time.time() > deadline:
+                pytest.fail("Webvis never became ready")
+            time.sleep(0.5)
+
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        shutil.copy(fixture_image_path, input_dir / "upload.png")
+
+        result = subprocess.run(
+            [sys.executable, "pipelines/batch.py", "--input-dir", str(input_dir), "--output-dir", str(output_dir)],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Address already in use" not in result.stderr
+
+        output_path = output_dir / "annotated.png"
+        assert output_path.exists()
+
+        output_image = cv2.imread(str(output_path))
+        assert output_image is not None
+        assert output_image.shape[:2] == cv2.imread(fixture_image_path).shape[:2]
+
+        # live.py must still be healthy after a batch run overlapped with it — not just that it
+        # didn't crash, but that Webvis is still actually serving frames.
+        assert live_process.poll() is None
+        assert webvis_ready(url=WEBVIS_URL, timeout=1)
+    finally:
+        live_process.terminate()
+        try:
+            live_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            live_process.kill()
+            live_process.wait()
