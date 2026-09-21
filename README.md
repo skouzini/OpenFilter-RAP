@@ -1,6 +1,7 @@
-# OpenFilter-RAP
+# Live Object Detection Studio with OpenFilter
 
-A Realtime Annotated Pipeline (RAP) proof-of-concept built on [OpenFilter](https://github.com/PlainsightAI/openfilter). It runs YOLOv8 object detection over a video source and reuses the same filter classes across three surfaces: a CLI live pipeline, a Streamlit control UI, and an OS-level virtual camera for video calls.
+
+A realtime, ML/CV annotated, proof-of-concept pipeline built on [OpenFilter](https://github.com/PlainsightAI/openfilter). It runs YOLOv8 object detection over a video source and reuses the same filter classes across three surfaces: a CLI live pipeline, a Streamlit control UI, and an OS-level virtual camera for video calls.
 
 The full design — architecture, filter responsibilities, and build order — lives in [`OpenFilter Proof-of-Concept Real-Time Annotated Pipeline.md`](<OpenFilter Proof-of-Concept Real-Time Annotated Pipeline.md>). This README covers day-to-day setup and usage.
 
