@@ -85,3 +85,7 @@ pytest
 - `pipelines/batch.py` — one-shot batch pipeline behind Streamlit's file-annotation feature: `ImageIn → Detector → PrivacyBlur → Annotator → ImageOut`.
 - `app/streamlit_app.py` — the control UI described above.
 - `tests/` — pytest suite covering the filters, the batch pipeline, and the Streamlit app.
+
+## Roadmap
+
+Possible next features for the Streamlit app are tracked in [`docs/streamlit-app-future-features.md`](docs/streamlit-app-future-features.md).
